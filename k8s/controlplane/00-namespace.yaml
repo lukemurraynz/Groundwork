@@ -1,0 +1,87 @@
+# The groundwork namespace and its baseline network posture.
+#
+# Both deployments reference `namespace: groundwork` and nothing was creating it — caught by reading
+# the manifests back rather than by a failed apply.
+#
+# It lives in the control plane's deploymentPath, not at k8s/ root, because azd applies only each
+# service's own path — a manifest at the root would never be applied by anything. The `00-` prefix
+# and `kubectl apply`'s kind ordering both put Namespace ahead of the namespaced resources.
+#
+# Applied by azd as part of the normal deploy, not by a direct `kubectl apply`. This platform
+# prohibits mutating cluster state outside azd (see ADR-0003), and a bootstrap hook running
+# kubectl would be exactly that.
+#
+# Pod Security Admission is set to `restricted` and *enforced*, not merely audited. The container
+# security contexts already satisfy it (non-root, no privilege escalation, all capabilities dropped,
+# read-only root filesystem); enforcing here means a future manifest that quietly relaxes one of
+# those is rejected by the cluster rather than accepted and forgotten.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: groundwork
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Default-deny ingress. The secretless-identity/least-privilege rule asks for isolation by
+# construction rather than by convention, and a namespace where anything can reach anything is
+# the opposite of that.
+#
+# Egress is deliberately NOT default-denied: the orchestrator must reach arbitrary Azure management
+# endpoints in customer tenants, and an egress allow-list would either be too broad to mean anything
+# or would break provisioning the first time Azure added an endpoint. Ingress is where the
+# meaningful boundary is.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: groundwork
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# The control plane is the only component that serves traffic. The orchestrator has no ingress rule
+# at all, so nothing in the cluster can call it directly — work reaches it through queued state in
+# Cosmos, which is what keeps the approval gate on the only path to execution.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-controlplane-ingress
+  namespace: groundwork
+spec:
+  podSelector:
+    matchLabels:
+      app: controlplane
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+---
+# cert-manager's HTTP-01 solver pods are created dynamically per certificate request, one per
+# challenge, and default-deny-ingress blocks them like everything else in the namespace — found
+# live (2026-08-23) when the letsencrypt-prod ClusterIssuer's Challenge hung at "Waiting for
+# HTTP-01 challenge propagation" with a self-check connection timeout traced to exactly this:
+# the solver pod's traffic was reaching the ingress controller but silently dropped before the
+# pod, indistinguishable from a network-routing problem until NetworkPolicy was checked directly.
+# Scoped to cert-manager's own well-known label rather than a static pod name (which is
+# per-challenge and can't be known ahead of time); the solver only ever serves a
+# `.well-known/acme-challenge/<token>` static response, so open ingress on it carries no real
+# exposure.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-cert-manager-http01-solver-ingress
+  namespace: groundwork
+spec:
+  podSelector:
+    matchLabels:
+      acme.cert-manager.io/http01-solver: "true"
+  policyTypes:
+    - Ingress
+  ingress:
+    - {}

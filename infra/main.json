@@ -1,0 +1,2694 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "8678158092571278603"
+    }
+  },
+  "parameters": {
+    "environmentName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 24,
+      "metadata": {
+        "description": "Environment name used to derive resource names. Supplied by azd."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "eastus2",
+      "allowedValues": [
+        "australiaeast",
+        "australiasoutheast",
+        "eastus",
+        "eastus2",
+        "westus3",
+        "swedencentral",
+        "francecentral",
+        "uksouth",
+        "canadacentral",
+        "japaneast",
+        "southeastasia",
+        "germanywestcentral"
+      ],
+      "metadata": {
+        "description": "Azure region. Restricted to regions where AKS, Foundry model deployments, Cosmos DB, and Speech are all available together. The original build of this platform constrained this to Australian regions only, for a customer data-residency requirement — if you need that, narrow the @allowed list back down to the region(s) you require."
+      }
+    },
+    "operatorPrincipalId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Object ID of the operator granted data-plane access for break-glass administration. Recorded in the audit trail when used."
+      }
+    },
+    "costProfile": {
+      "type": "string",
+      "defaultValue": "dev",
+      "allowedValues": [
+        "dev",
+        "production"
+      ],
+      "metadata": {
+        "description": "Capacity profile. Affects sizing only; every security control is identical in both."
+      }
+    },
+    "budgetContactEmail": {
+      "type": "string",
+      "defaultValue": ""
+    },
+    "budgetAmount": {
+      "type": "int",
+      "defaultValue": 200
+    },
+    "recoverKeyVault": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Recover a soft-deleted Key Vault of the derived name instead of creating a new one. See modules/keyvault.bicep."
+      }
+    },
+    "kubernetesVersion": {
+      "type": "string",
+      "defaultValue": "1.35",
+      "metadata": {
+        "description": "Kubernetes version for the AKS cluster."
+      }
+    },
+    "foundryAccountTokenOverride": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Override for the Foundry account naming token. Leave empty to use the standard resourceToken."
+      }
+    }
+  },
+  "variables": {
+    "isProduction": "[equals(parameters('costProfile'), 'production')]",
+    "availabilityZones": [
+      "1",
+      "2",
+      "3"
+    ],
+    "resourceToken": "[toLower(uniqueString(subscription().id, parameters('environmentName'), parameters('location')))]",
+    "foundryResourceToken": "[if(empty(parameters('foundryAccountTokenOverride')), variables('resourceToken'), parameters('foundryAccountTokenOverride'))]",
+    "tags": {
+      "azd-env-name": "[parameters('environmentName')]",
+      "application": "groundwork",
+      "environment": "[parameters('environmentName')]",
+      "dataClassification": "confidential"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/resourceGroups",
+      "apiVersion": "2024-11-01",
+      "name": "[format('rg-{0}', parameters('environmentName'))]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('tags')]"
+    },
+    {
+      "condition": "[not(empty(parameters('budgetContactEmail')))]",
+      "type": "Microsoft.Consumption/budgets",
+      "apiVersion": "2019-11-01",
+      "name": "groundwork-monthly",
+      "properties": {
+        "category": "Cost",
+        "amount": "[parameters('budgetAmount')]",
+        "timeGrain": "Monthly",
+        "timePeriod": {
+          "startDate": "2026-09-01"
+        },
+        "notifications": {
+          "enabled": true,
+          "operator": "GreaterThanOrEqual",
+          "threshold": 100,
+          "contactEmails": [
+            "[parameters('budgetContactEmail')]"
+          ],
+          "thresholdType": "Actual"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-identity",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "3832199430057944107"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Deterministic suffix derived from subscription, environment, and location."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[format('id-gw-cp-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[union(parameters('tags'), createObject('component', 'controlplane'))]"
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[format('id-gw-orch-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[union(parameters('tags'), createObject('component', 'orchestrator'))]"
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[format('id-gw-aks-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[union(parameters('tags'), createObject('component', 'cluster'))]"
+            }
+          ],
+          "outputs": {
+            "controlPlaneIdentityId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-gw-cp-{0}', parameters('resourceToken')))]"
+            },
+            "controlPlanePrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-gw-cp-{0}', parameters('resourceToken'))), '2023-01-31').principalId]"
+            },
+            "controlPlaneClientId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-gw-cp-{0}', parameters('resourceToken'))), '2023-01-31').clientId]"
+            },
+            "orchestratorIdentityId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-gw-orch-{0}', parameters('resourceToken')))]"
+            },
+            "orchestratorPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-gw-orch-{0}', parameters('resourceToken'))), '2023-01-31').principalId]"
+            },
+            "orchestratorClientId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-gw-orch-{0}', parameters('resourceToken'))), '2023-01-31').clientId]"
+            },
+            "clusterIdentityId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-gw-aks-{0}', parameters('resourceToken')))]"
+            },
+            "clusterPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-gw-aks-{0}', parameters('resourceToken'))), '2023-01-31').principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-observability",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          },
+          "retentionInDays": "[if(variables('isProduction'), createObject('value', 365), createObject('value', 30))]",
+          "controlPlanePrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.controlPlanePrincipalId.value]"
+          },
+          "orchestratorPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.orchestratorPrincipalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "11838370297818333069"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Deterministic suffix."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            },
+            "retentionInDays": {
+              "type": "int",
+              "defaultValue": 365,
+              "minValue": 30,
+              "maxValue": 730,
+              "metadata": {
+                "description": "Log retention in days. 365 to match the FR-052a audit and report retention period."
+              }
+            },
+            "controlPlanePrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the control-plane workload identity, granted ingestion access."
+              }
+            },
+            "orchestratorPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the orchestrator workload identity, granted ingestion access."
+              }
+            }
+          },
+          "variables": {
+            "monitoringMetricsPublisherRoleId": "3913510d-42f4-4e42-8a64-420c390055eb"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces",
+              "apiVersion": "2023-09-01",
+              "name": "[format('log-groundwork-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "sku": {
+                  "name": "PerGB2018"
+                },
+                "retentionInDays": "[parameters('retentionInDays')]",
+                "features": {
+                  "enableLogAccessUsingOnlyResourcePermissions": true
+                },
+                "publicNetworkAccessForIngestion": "Enabled",
+                "publicNetworkAccessForQuery": "Enabled"
+              }
+            },
+            {
+              "type": "Microsoft.Insights/components",
+              "apiVersion": "2020-02-02",
+              "name": "[format('appi-groundwork-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "web",
+              "properties": {
+                "Application_Type": "web",
+                "WorkspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]",
+                "DisableLocalAuth": true,
+                "IngestionMode": "LogAnalytics"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Insights/components', format('appi-groundwork-{0}', parameters('resourceToken')))]",
+              "name": "[guid(resourceId('Microsoft.Insights/components', format('appi-groundwork-{0}', parameters('resourceToken'))), parameters('controlPlanePrincipalId'), variables('monitoringMetricsPublisherRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('monitoringMetricsPublisherRoleId'))]",
+                "principalId": "[parameters('controlPlanePrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/components', format('appi-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Insights/components', format('appi-groundwork-{0}', parameters('resourceToken')))]",
+              "name": "[guid(resourceId('Microsoft.Insights/components', format('appi-groundwork-{0}', parameters('resourceToken'))), parameters('orchestratorPrincipalId'), variables('monitoringMetricsPublisherRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('monitoringMetricsPublisherRoleId'))]",
+                "principalId": "[parameters('orchestratorPrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/components', format('appi-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/actionGroups",
+              "apiVersion": "2023-01-01",
+              "name": "[format('ag-groundwork-{0}', parameters('resourceToken'))]",
+              "location": "global",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "groupShortName": "gwops",
+                "enabled": true,
+                "emailReceivers": []
+              }
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-03-15-preview",
+              "name": "[format('alert-gw-deployment-failures-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "Groundwork deployment failure rate",
+                "description": "Fires when deployment failures exceed the tolerated rate (FR-054).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "AppTraces | where Properties.event == \"deployment_failed\" | summarize Failures = count()",
+                      "timeAggregation": "Count",
+                      "operator": "GreaterThan",
+                      "threshold": 2,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-03-15-preview",
+              "name": "[format('alert-gw-queue-depth-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "Groundwork deployment queue depth",
+                "description": "Fires when queued deployments accumulate, indicating the per-tenant cap or worker capacity needs attention (FR-045a, FR-054).",
+                "severity": 2,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT30M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "AppMetrics | where Name == \"groundwork_queue_depth\" | summarize Depth = max(Max)",
+                      "timeAggregation": "Maximum",
+                      "metricMeasureColumn": "Depth",
+                      "operator": "GreaterThan",
+                      "threshold": 20,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-03-15-preview",
+              "name": "[format('alert-gw-stage-duration-breach-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "Groundwork stage duration breach",
+                "description": "Fires when any single blueprint stage attempt runs longer than expected (FR-054).",
+                "severity": 2,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "AppMetrics | where Name == \"groundwork_stage_duration_seconds\" | summarize LongestSeconds = max(Max)",
+                      "timeAggregation": "Maximum",
+                      "metricMeasureColumn": "LongestSeconds",
+                      "operator": "GreaterThan",
+                      "threshold": 600,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-03-15-preview",
+              "name": "[format('alert-gw-dependency-unavailability-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "Groundwork dependency unavailability",
+                "description": "Fires when outbound dependency calls (Azure APIs, Retail Prices, Azure DevOps) fail at a sustained rate (FR-054).",
+                "severity": 2,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "AppDependencies | summarize FailurePerMille = 1000 * countif(Success == false) / count()",
+                      "timeAggregation": "Average",
+                      "metricMeasureColumn": "FailurePerMille",
+                      "operator": "GreaterThan",
+                      "threshold": 100,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-03-15-preview",
+              "name": "[format('alert-gw-availability-slo-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "Groundwork request surface availability SLO (99.9%)",
+                "description": "Availability of authentication, plan generation, approval, and status queries. Excludes in-flight deployment progression per SC-014.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT30M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "AppRequests | where Url !contains \"/deployments/\" or Name startswith \"GET\" | summarize SuccessPerMille = 1000 * countif(Success == true) / count()",
+                      "timeAggregation": "Average",
+                      "metricMeasureColumn": "SuccessPerMille",
+                      "operator": "LessThan",
+                      "threshold": 999,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-03-15-preview",
+              "name": "[format('alert-gw-queue-poll-heartbeat-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "Groundwork queue-poll heartbeat missing",
+                "description": "Fires when the orchestrator queue-consumption loop stops emitting its per-cycle heartbeat (FR-054). Silence means hung or dead worker.",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT10M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "AppTraces | where Properties.event == \"queue_poll_cycle\" | summarize Cycles = count()",
+                      "timeAggregation": "Count",
+                      "operator": "LessThan",
+                      "threshold": 1,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-03-15-preview",
+              "name": "[format('alert-gw-platform-drift-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "Groundwork platform drift detected",
+                "description": "Fires when drift-watch classifies an onboarded tenant subscription as drifted - a readiness check regressed into blocking after deployment (FR-054).",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT5M",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "AppTraces | where Properties.event == \"platform_drift_detected\" | summarize Hits = count()",
+                      "timeAggregation": "Count",
+                      "operator": "GreaterThan",
+                      "threshold": 0,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/scheduledQueryRules",
+              "apiVersion": "2023-03-15-preview",
+              "name": "[format('alert-gw-drift-loop-heartbeat-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "displayName": "Groundwork drift-watch loop missing",
+                "description": "Fires when no drift evaluation cycle completes for an hour - the loop is hung or dead on every pod.",
+                "severity": 2,
+                "enabled": true,
+                "evaluationFrequency": "PT15M",
+                "windowSize": "PT1H",
+                "scopes": [
+                  "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+                ],
+                "criteria": {
+                  "allOf": [
+                    {
+                      "query": "AppTraces | where Properties.event == \"drift_evaluation_cycle_completed\" | summarize Cycles = count()",
+                      "timeAggregation": "Count",
+                      "operator": "LessThan",
+                      "threshold": 1,
+                      "failingPeriods": {
+                        "numberOfEvaluationPeriods": 1,
+                        "minFailingPeriodsToAlert": 1
+                      }
+                    }
+                  ]
+                },
+                "actions": {
+                  "actionGroups": [
+                    "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]"
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]",
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.OperationalInsights/workspaces', format('log-groundwork-{0}', parameters('resourceToken')))]"
+            },
+            "appInsightsConnectionString": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Insights/components', format('appi-groundwork-{0}', parameters('resourceToken'))), '2020-02-02').ConnectionString]"
+            },
+            "actionGroupId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/actionGroups', format('ag-groundwork-{0}', parameters('resourceToken')))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-storage",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          },
+          "controlPlanePrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.controlPlanePrincipalId.value]"
+          },
+          "orchestratorPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.orchestratorPrincipalId.value]"
+          },
+          "operatorPrincipalId": {
+            "value": "[parameters('operatorPrincipalId')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "16728946297494978346"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Deterministic suffix."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            },
+            "controlPlanePrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the control-plane identity. Writes approval artefacts."
+              }
+            },
+            "orchestratorPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the orchestrator identity. Writes reports and previews."
+              }
+            },
+            "operatorPrincipalId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Principal ID of the human operator running azd, for local read/write access during development and verification. Empty skips the grant."
+              }
+            },
+            "retentionDays": {
+              "type": "int",
+              "defaultValue": 365,
+              "metadata": {
+                "description": "Retention period in days. 365 per FR-052a."
+              }
+            }
+          },
+          "variables": {
+            "immutableContainers": [
+              "reports",
+              "approvals",
+              "previews",
+              "consent"
+            ],
+            "blobContributorRoleId": "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2023-05-01",
+              "name": "[format('stgw{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "sku": {
+                "name": "Standard_ZRS"
+              },
+              "kind": "StorageV2",
+              "properties": {
+                "allowSharedKeyAccess": false,
+                "allowBlobPublicAccess": false,
+                "minimumTlsVersion": "TLS1_2",
+                "supportsHttpsTrafficOnly": true,
+                "publicNetworkAccess": "Enabled",
+                "networkAcls": {
+                  "bypass": "AzureServices",
+                  "defaultAction": "Allow"
+                },
+                "encryption": {
+                  "requireInfrastructureEncryption": true,
+                  "services": {
+                    "blob": {
+                      "enabled": true,
+                      "keyType": "Account"
+                    }
+                  },
+                  "keySource": "Microsoft.Storage"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}', format('stgw{0}', parameters('resourceToken')), 'default')]",
+              "properties": {
+                "deleteRetentionPolicy": {
+                  "enabled": true,
+                  "days": 7
+                },
+                "containerDeleteRetentionPolicy": {
+                  "enabled": true,
+                  "days": 7
+                },
+                "isVersioningEnabled": true
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "copy": {
+                "name": "containers",
+                "count": "[length(variables('immutableContainers'))]"
+              },
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}/{2}', format('stgw{0}', parameters('resourceToken')), 'default', variables('immutableContainers')[copyIndex()])]",
+              "properties": {
+                "publicAccess": "None",
+                "metadata": {
+                  "dataClassification": "confidential",
+                  "retentionDays": "[format('{0}', parameters('retentionDays'))]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', format('stgw{0}', parameters('resourceToken')), 'default')]"
+              ]
+            },
+            {
+              "copy": {
+                "name": "immutabilityPolicies",
+                "count": "[length(variables('immutableContainers'))]"
+              },
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/default/{1}/default', format('stgw{0}', parameters('resourceToken')), variables('immutableContainers')[copyIndex()])]",
+              "properties": {
+                "immutabilityPeriodSinceCreationInDays": "[parameters('retentionDays')]",
+                "allowProtectedAppendWrites": false
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', format('stgw{0}', parameters('resourceToken')), 'default', variables('immutableContainers')[copyIndex()])]",
+                "[resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/managementPolicies",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}', format('stgw{0}', parameters('resourceToken')), 'default')]",
+              "properties": {
+                "policy": {
+                  "rules": [
+                    {
+                      "name": "delete-after-retention",
+                      "enabled": true,
+                      "type": "Lifecycle",
+                      "definition": {
+                        "filters": {
+                          "blobTypes": [
+                            "blockBlob"
+                          ],
+                          "prefixMatch": "[variables('immutableContainers')]"
+                        },
+                        "actions": {
+                          "baseBlob": {
+                            "delete": {
+                              "daysAfterCreationGreaterThan": "[parameters('retentionDays')]"
+                            }
+                          },
+                          "version": {
+                            "delete": {
+                              "daysAfterCreationGreaterThan": "[parameters('retentionDays')]"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken')))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken'))), parameters('orchestratorPrincipalId'), variables('blobContributorRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobContributorRoleId'))]",
+                "principalId": "[parameters('orchestratorPrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken')))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken'))), parameters('controlPlanePrincipalId'), variables('blobContributorRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobContributorRoleId'))]",
+                "principalId": "[parameters('controlPlanePrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken')))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken'))), parameters('operatorPrincipalId'), variables('blobContributorRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('blobContributorRoleId'))]",
+                "principalId": "[parameters('operatorPrincipalId')]",
+                "principalType": "User"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "blobEndpoint": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Storage/storageAccounts', format('stgw{0}', parameters('resourceToken'))), '2023-05-01').primaryEndpoints.blob]"
+            },
+            "accountName": {
+              "type": "string",
+              "value": "[format('stgw{0}', parameters('resourceToken'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-cosmos",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          },
+          "availabilityZones": {
+            "value": "[variables('availabilityZones')]"
+          },
+          "maxThroughput": "[if(variables('isProduction'), createObject('value', 4000), createObject('value', 1000))]",
+          "controlPlanePrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.controlPlanePrincipalId.value]"
+          },
+          "orchestratorPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.orchestratorPrincipalId.value]"
+          },
+          "operatorPrincipalId": {
+            "value": "[parameters('operatorPrincipalId')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "7796964007591865566"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Deterministic suffix."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            },
+            "availabilityZones": {
+              "type": "array",
+              "metadata": {
+                "description": "Availability zones for zone redundancy (FR-041a)."
+              }
+            },
+            "maxThroughput": {
+              "type": "int",
+              "defaultValue": 4000,
+              "minValue": 1000,
+              "metadata": {
+                "description": "Maximum autoscale throughput (RU/s). 1000 is the platform minimum for autoscale."
+              }
+            },
+            "controlPlanePrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the control-plane identity."
+              }
+            },
+            "orchestratorPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the orchestrator identity."
+              }
+            },
+            "operatorPrincipalId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Principal ID of the human operator running azd, for local read/write access during development and verification. Empty skips the grant."
+              }
+            }
+          },
+          "variables": {
+            "databaseName": "groundwork",
+            "twelveMonthsInSeconds": 31536000,
+            "containers": [
+              {
+                "name": "tenants",
+                "partitionKey": "/tenantId",
+                "defaultTtl": -1
+              },
+              {
+                "name": "plans",
+                "partitionKey": "/tenantId",
+                "defaultTtl": -1
+              },
+              {
+                "name": "validations",
+                "partitionKey": "/tenantId",
+                "defaultTtl": -1
+              },
+              {
+                "name": "approvals",
+                "partitionKey": "/tenantId",
+                "defaultTtl": -1
+              },
+              {
+                "name": "deployments",
+                "partitionKey": "/tenantId",
+                "defaultTtl": -1
+              },
+              {
+                "name": "stage_records",
+                "partitionKey": "/tenantId",
+                "defaultTtl": -1
+              },
+              {
+                "name": "audit",
+                "partitionKey": "/tenantId",
+                "defaultTtl": "[variables('twelveMonthsInSeconds')]"
+              },
+              {
+                "name": "reports",
+                "partitionKey": "/tenantId",
+                "defaultTtl": "[variables('twelveMonthsInSeconds')]"
+              },
+              {
+                "name": "drift_summaries",
+                "partitionKey": "/tenantId",
+                "defaultTtl": "[variables('twelveMonthsInSeconds')]"
+              },
+              {
+                "name": "conversations",
+                "partitionKey": "/tenantId",
+                "defaultTtl": "[variables('twelveMonthsInSeconds')]"
+              },
+              {
+                "name": "subscription_leases",
+                "partitionKey": "/subscriptionId",
+                "defaultTtl": 3600
+              }
+            ],
+            "dataContributorRoleId": "00000000-0000-0000-0000-000000000002"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.DocumentDB/databaseAccounts",
+              "apiVersion": "2024-11-15",
+              "name": "[format('cosmos-groundwork-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "GlobalDocumentDB",
+              "properties": {
+                "databaseAccountOfferType": "Standard",
+                "disableLocalAuth": true,
+                "disableKeyBasedMetadataWriteAccess": true,
+                "minimalTlsVersion": "Tls12",
+                "enableAutomaticFailover": false,
+                "enableMultipleWriteLocations": false,
+                "locations": [
+                  {
+                    "locationName": "[parameters('location')]",
+                    "failoverPriority": 0,
+                    "isZoneRedundant": "[not(empty(parameters('availabilityZones')))]"
+                  }
+                ],
+                "consistencyPolicy": {
+                  "defaultConsistencyLevel": "BoundedStaleness",
+                  "maxStalenessPrefix": 100,
+                  "maxIntervalInSeconds": 5
+                },
+                "backupPolicy": {
+                  "type": "Continuous",
+                  "continuousModeProperties": {
+                    "tier": "Continuous7Days"
+                  }
+                },
+                "publicNetworkAccess": "Enabled"
+              }
+            },
+            {
+              "type": "Microsoft.DocumentDB/databaseAccounts/sqlDatabases",
+              "apiVersion": "2024-11-15",
+              "name": "[format('{0}/{1}', format('cosmos-groundwork-{0}', parameters('resourceToken')), variables('databaseName'))]",
+              "properties": {
+                "resource": {
+                  "id": "[variables('databaseName')]"
+                },
+                "options": {
+                  "autoscaleSettings": {
+                    "maxThroughput": "[parameters('maxThroughput')]"
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "copy": {
+                "name": "containerResources",
+                "count": "[length(variables('containers'))]"
+              },
+              "type": "Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers",
+              "apiVersion": "2024-11-15",
+              "name": "[format('{0}/{1}/{2}', format('cosmos-groundwork-{0}', parameters('resourceToken')), variables('databaseName'), variables('containers')[copyIndex()].name)]",
+              "properties": {
+                "resource": {
+                  "id": "[variables('containers')[copyIndex()].name]",
+                  "partitionKey": {
+                    "paths": [
+                      "[variables('containers')[copyIndex()].partitionKey]"
+                    ],
+                    "kind": "Hash",
+                    "version": 2
+                  },
+                  "defaultTtl": "[variables('containers')[copyIndex()].defaultTtl]",
+                  "indexingPolicy": {
+                    "indexingMode": "consistent",
+                    "automatic": true,
+                    "includedPaths": [
+                      {
+                        "path": "/*"
+                      }
+                    ],
+                    "excludedPaths": [
+                      {
+                        "path": "/\"_etag\"/?"
+                      },
+                      {
+                        "path": "/transcript/*"
+                      }
+                    ]
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.DocumentDB/databaseAccounts/sqlDatabases', format('cosmos-groundwork-{0}', parameters('resourceToken')), variables('databaseName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments",
+              "apiVersion": "2024-11-15",
+              "name": "[format('{0}/{1}', format('cosmos-groundwork-{0}', parameters('resourceToken')), guid(resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken'))), parameters('controlPlanePrincipalId'), variables('dataContributorRoleId')))]",
+              "properties": {
+                "roleDefinitionId": "[format('{0}/sqlRoleDefinitions/{1}', resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken'))), variables('dataContributorRoleId'))]",
+                "principalId": "[parameters('controlPlanePrincipalId')]",
+                "scope": "[resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken')))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments",
+              "apiVersion": "2024-11-15",
+              "name": "[format('{0}/{1}', format('cosmos-groundwork-{0}', parameters('resourceToken')), guid(resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken'))), parameters('orchestratorPrincipalId'), variables('dataContributorRoleId')))]",
+              "properties": {
+                "roleDefinitionId": "[format('{0}/sqlRoleDefinitions/{1}', resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken'))), variables('dataContributorRoleId'))]",
+                "principalId": "[parameters('orchestratorPrincipalId')]",
+                "scope": "[resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken')))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+              "type": "Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments",
+              "apiVersion": "2024-11-15",
+              "name": "[format('{0}/{1}', format('cosmos-groundwork-{0}', parameters('resourceToken')), guid(resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken'))), parameters('operatorPrincipalId'), variables('dataContributorRoleId')))]",
+              "properties": {
+                "roleDefinitionId": "[format('{0}/sqlRoleDefinitions/{1}', resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken'))), variables('dataContributorRoleId'))]",
+                "principalId": "[parameters('operatorPrincipalId')]",
+                "scope": "[resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken')))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "endpoint": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.DocumentDB/databaseAccounts', format('cosmos-groundwork-{0}', parameters('resourceToken'))), '2024-11-15').documentEndpoint]"
+            },
+            "accountName": {
+              "type": "string",
+              "value": "[format('cosmos-groundwork-{0}', parameters('resourceToken'))]"
+            },
+            "databaseName": {
+              "type": "string",
+              "value": "[variables('databaseName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-keyvault",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          },
+          "operatorPrincipalId": {
+            "value": "[parameters('operatorPrincipalId')]"
+          },
+          "controlPlanePrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.controlPlanePrincipalId.value]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-observability'), '2025-04-01').outputs.logAnalyticsWorkspaceId.value]"
+          },
+          "recoverVault": {
+            "value": "[parameters('recoverKeyVault')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "12641073939268571775"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Deterministic suffix."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            },
+            "operatorPrincipalId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Object ID of the break-glass operator. Empty means no standing human access, which is the preferred posture."
+              }
+            },
+            "controlPlanePrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the control-plane workload identity, granted read access to secrets."
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Log Analytics workspace for diagnostics."
+              }
+            },
+            "recoverVault": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Recover a soft-deleted vault of this name instead of creating a new one."
+              }
+            }
+          },
+          "variables": {
+            "secretsUserRoleId": "4633458b-17de-408a-b874-0445c86b69e6"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.KeyVault/vaults",
+              "apiVersion": "2023-07-01",
+              "name": "[format('kv-gw-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "sku": {
+                  "family": "A",
+                  "name": "standard"
+                },
+                "tenantId": "[subscription().tenantId]",
+                "createMode": "[if(parameters('recoverVault'), 'recover', 'default')]",
+                "enableRbacAuthorization": true,
+                "enableSoftDelete": true,
+                "softDeleteRetentionInDays": 90,
+                "enablePurgeProtection": true,
+                "publicNetworkAccess": "Enabled",
+                "networkAcls": {
+                  "bypass": "AzureServices",
+                  "defaultAction": "Allow"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', format('kv-gw-{0}', parameters('resourceToken')))]",
+              "name": "kv-diagnostics",
+              "properties": {
+                "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+                "logs": [
+                  {
+                    "category": "AuditEvent",
+                    "enabled": true
+                  },
+                  {
+                    "category": "AzurePolicyEvaluationDetails",
+                    "enabled": true
+                  }
+                ],
+                "metrics": [
+                  {
+                    "category": "AllMetrics",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', format('kv-gw-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', format('kv-gw-{0}', parameters('resourceToken')))]",
+              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', format('kv-gw-{0}', parameters('resourceToken'))), parameters('operatorPrincipalId'), variables('secretsUserRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('secretsUserRoleId'))]",
+                "principalId": "[parameters('operatorPrincipalId')]",
+                "principalType": "User"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', format('kv-gw-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', format('kv-gw-{0}', parameters('resourceToken')))]",
+              "name": "[guid(resourceId('Microsoft.KeyVault/vaults', format('kv-gw-{0}', parameters('resourceToken'))), parameters('controlPlanePrincipalId'), variables('secretsUserRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('secretsUserRoleId'))]",
+                "principalId": "[parameters('controlPlanePrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', format('kv-gw-{0}', parameters('resourceToken')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "vaultUri": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.KeyVault/vaults', format('kv-gw-{0}', parameters('resourceToken'))), '2023-07-01').vaultUri]"
+            },
+            "vaultName": {
+              "type": "string",
+              "value": "[format('kv-gw-{0}', parameters('resourceToken'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity')]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-observability')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-registry",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "12706632772264412172"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "minLength": 13,
+              "metadata": {
+                "description": "Deterministic suffix."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            },
+            "sku": {
+              "type": "string",
+              "defaultValue": "Basic",
+              "allowedValues": [
+                "Basic",
+                "Standard",
+                "Premium"
+              ],
+              "metadata": {
+                "description": "Registry SKU. Basic is sufficient for a development environment; Premium is required for private endpoints and geo-replication."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ContainerRegistry/registries",
+              "apiVersion": "2023-07-01",
+              "name": "[format('crgw{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "sku": {
+                "name": "[parameters('sku')]"
+              },
+              "properties": {
+                "adminUserEnabled": false,
+                "publicNetworkAccess": "Enabled",
+                "policies": {
+                  "retentionPolicy": "[if(equals(parameters('sku'), 'Premium'), createObject('status', 'enabled', 'days', 30), null())]"
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "loginServer": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', format('crgw{0}', parameters('resourceToken'))), '2023-07-01').loginServer]"
+            },
+            "registryName": {
+              "type": "string",
+              "value": "[format('crgw{0}', parameters('resourceToken'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-aks",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          },
+          "kubernetesVersion": {
+            "value": "[parameters('kubernetesVersion')]"
+          },
+          "availabilityZones": {
+            "value": "[variables('availabilityZones')]"
+          },
+          "nodeVmSize": "[if(variables('isProduction'), createObject('value', 'Standard_D4s_v5'), createObject('value', 'Standard_D2s_v5'))]",
+          "systemPoolMinCount": "[if(variables('isProduction'), createObject('value', 3), createObject('value', 1))]",
+          "systemPoolMaxCount": "[if(variables('isProduction'), createObject('value', 3), createObject('value', 2))]",
+          "controlPlanePoolMinCount": "[if(variables('isProduction'), createObject('value', 2), createObject('value', 1))]",
+          "controlPlanePoolMaxCount": "[if(variables('isProduction'), createObject('value', 6), createObject('value', 3))]",
+          "executorPoolMinCount": "[if(variables('isProduction'), createObject('value', 2), createObject('value', 1))]",
+          "executorPoolMaxCount": "[if(variables('isProduction'), createObject('value', 6), createObject('value', 3))]",
+          "logAnalyticsWorkspaceId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-observability'), '2025-04-01').outputs.logAnalyticsWorkspaceId.value]"
+          },
+          "controlPlaneIdentityId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.controlPlaneIdentityId.value]"
+          },
+          "orchestratorIdentityId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.orchestratorIdentityId.value]"
+          },
+          "clusterIdentityId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.clusterIdentityId.value]"
+          },
+          "operatorPrincipalId": {
+            "value": "[parameters('operatorPrincipalId')]"
+          },
+          "containerRegistryName": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-registry'), '2025-04-01').outputs.registryName.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "8116383617003885456"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Deterministic suffix."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            },
+            "kubernetesVersion": {
+              "type": "string",
+              "metadata": {
+                "description": "Kubernetes version, pinned so an upgrade is a reviewed change rather than drift."
+              }
+            },
+            "availabilityZones": {
+              "type": "array",
+              "metadata": {
+                "description": "Availability zones (FR-041a)."
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Log Analytics workspace for container insights."
+              }
+            },
+            "clusterIdentityId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the AKS control-plane identity."
+              }
+            },
+            "controlPlaneIdentityId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the control-plane workload identity."
+              }
+            },
+            "orchestratorIdentityId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the orchestrator workload identity."
+              }
+            },
+            "operatorPrincipalId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Object ID of the operator who needs kubectl access to deploy and administer the cluster. Empty means no standing human access."
+              }
+            },
+            "containerRegistryName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the container registry nodes pull images from."
+              }
+            },
+            "nodeVmSize": {
+              "type": "string",
+              "defaultValue": "Standard_D4s_v5",
+              "metadata": {
+                "description": "VM size for all node pools. Note this is immutable per pool — changing it replaces the node pools."
+              }
+            },
+            "systemPoolMinCount": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1,
+              "metadata": {
+                "description": "Minimum system node pool size."
+              }
+            },
+            "systemPoolMaxCount": {
+              "type": "int",
+              "defaultValue": 3,
+              "minValue": 1,
+              "metadata": {
+                "description": "Maximum system node pool size."
+              }
+            },
+            "controlPlanePoolMinCount": {
+              "type": "int",
+              "defaultValue": 2,
+              "minValue": 1,
+              "metadata": {
+                "description": "Minimum control-plane node pool size."
+              }
+            },
+            "controlPlanePoolMaxCount": {
+              "type": "int",
+              "defaultValue": 6,
+              "minValue": 1,
+              "metadata": {
+                "description": "Maximum control-plane node pool size."
+              }
+            },
+            "executorPoolMinCount": {
+              "type": "int",
+              "defaultValue": 2,
+              "minValue": 1,
+              "metadata": {
+                "description": "Minimum executor node pool size."
+              }
+            },
+            "executorPoolMaxCount": {
+              "type": "int",
+              "defaultValue": 6,
+              "minValue": 1,
+              "metadata": {
+                "description": "Maximum executor node pool size."
+              }
+            }
+          },
+          "variables": {
+            "aksRbacClusterAdminRoleId": "b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b",
+            "acrPullRoleId": "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ContainerService/managedClusters",
+              "apiVersion": "2024-10-01",
+              "name": "[format('aks-groundwork-{0}', parameters('resourceToken'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                  "[format('{0}', parameters('clusterIdentityId'))]": {}
+                }
+              },
+              "properties": {
+                "kubernetesVersion": "[parameters('kubernetesVersion')]",
+                "dnsPrefix": "[format('gw-{0}', parameters('resourceToken'))]",
+                "enableRBAC": true,
+                "securityProfile": {
+                  "workloadIdentity": {
+                    "enabled": true
+                  },
+                  "imageCleaner": {
+                    "enabled": true,
+                    "intervalHours": 24
+                  }
+                },
+                "oidcIssuerProfile": {
+                  "enabled": true
+                },
+                "ingressProfile": {
+                  "webAppRouting": {
+                    "enabled": true
+                  }
+                },
+                "aadProfile": {
+                  "managed": true,
+                  "enableAzureRBAC": true
+                },
+                "disableLocalAccounts": true,
+                "agentPoolProfiles": [
+                  {
+                    "name": "system",
+                    "mode": "System",
+                    "count": "[parameters('systemPoolMinCount')]",
+                    "vmSize": "[parameters('nodeVmSize')]",
+                    "osType": "Linux",
+                    "osSKU": "AzureLinux",
+                    "availabilityZones": "[parameters('availabilityZones')]",
+                    "enableAutoScaling": true,
+                    "minCount": "[parameters('systemPoolMinCount')]",
+                    "maxCount": "[parameters('systemPoolMaxCount')]",
+                    "maxPods": 50,
+                    "nodeTaints": [
+                      "CriticalAddonsOnly=true:NoSchedule"
+                    ],
+                    "upgradeSettings": {
+                      "maxSurge": "33%"
+                    }
+                  },
+                  {
+                    "name": "controlplane",
+                    "mode": "User",
+                    "count": "[parameters('controlPlanePoolMinCount')]",
+                    "vmSize": "[parameters('nodeVmSize')]",
+                    "osType": "Linux",
+                    "osSKU": "AzureLinux",
+                    "availabilityZones": "[parameters('availabilityZones')]",
+                    "enableAutoScaling": true,
+                    "minCount": "[parameters('controlPlanePoolMinCount')]",
+                    "maxCount": "[parameters('controlPlanePoolMaxCount')]",
+                    "maxPods": 50,
+                    "nodeLabels": {
+                      "groundwork.io/tier": "controlplane"
+                    },
+                    "upgradeSettings": {
+                      "maxSurge": "1"
+                    }
+                  },
+                  {
+                    "name": "executor",
+                    "mode": "User",
+                    "count": "[parameters('executorPoolMinCount')]",
+                    "vmSize": "[parameters('nodeVmSize')]",
+                    "osType": "Linux",
+                    "osSKU": "AzureLinux",
+                    "availabilityZones": "[parameters('availabilityZones')]",
+                    "enableAutoScaling": true,
+                    "minCount": "[parameters('executorPoolMinCount')]",
+                    "maxCount": "[parameters('executorPoolMaxCount')]",
+                    "maxPods": 30,
+                    "nodeLabels": {
+                      "groundwork.io/tier": "executor"
+                    },
+                    "upgradeSettings": {
+                      "maxSurge": "1"
+                    }
+                  }
+                ],
+                "networkProfile": {
+                  "networkPlugin": "azure",
+                  "networkPluginMode": "overlay",
+                  "networkPolicy": "cilium",
+                  "networkDataplane": "cilium",
+                  "loadBalancerSku": "standard",
+                  "outboundType": "loadBalancer",
+                  "serviceCidr": "10.100.0.0/16",
+                  "dnsServiceIP": "10.100.0.10"
+                },
+                "autoUpgradeProfile": {
+                  "upgradeChannel": "patch",
+                  "nodeOSUpgradeChannel": "NodeImage"
+                },
+                "addonProfiles": {
+                  "omsagent": {
+                    "enabled": true,
+                    "config": {
+                      "logAnalyticsWorkspaceResourceID": "[parameters('logAnalyticsWorkspaceId')]"
+                    }
+                  },
+                  "azureKeyvaultSecretsProvider": {
+                    "enabled": true,
+                    "config": {
+                      "enableSecretRotation": "true",
+                      "rotationPollInterval": "2m"
+                    }
+                  }
+                },
+                "autoScalerProfile": {
+                  "skip-nodes-with-local-storage": "false",
+                  "skip-nodes-with-system-pods": "true",
+                  "max-graceful-termination-sec": "600"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
+              "apiVersion": "2023-01-31",
+              "name": "[format('{0}/gw-controlplane', last(split(parameters('controlPlaneIdentityId'), '/')))]",
+              "properties": {
+                "issuer": "[reference(resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken'))), '2024-10-01').oidcIssuerProfile.issuerURL]",
+                "subject": "system:serviceaccount:groundwork:controlplane",
+                "audiences": [
+                  "api://AzureADTokenExchange"
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
+              "apiVersion": "2023-01-31",
+              "name": "[format('{0}/gw-orchestrator', last(split(parameters('orchestratorIdentityId'), '/')))]",
+              "properties": {
+                "issuer": "[reference(resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken'))), '2024-10-01').oidcIssuerProfile.issuerURL]",
+                "subject": "system:serviceaccount:groundwork:orchestrator",
+                "audiences": [
+                  "api://AzureADTokenExchange"
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken')))]",
+              "name": "[guid(resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken'))), parameters('operatorPrincipalId'), variables('aksRbacClusterAdminRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('aksRbacClusterAdminRoleId'))]",
+                "principalId": "[parameters('operatorPrincipalId')]",
+                "principalType": "User"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('containerRegistryName'))]",
+              "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('containerRegistryName')), resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken'))), variables('acrPullRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('acrPullRoleId'))]",
+                "principalId": "[reference(resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken'))), '2024-10-01').identityProfile.kubeletidentity.objectId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "clusterName": {
+              "type": "string",
+              "value": "[format('aks-groundwork-{0}', parameters('resourceToken'))]"
+            },
+            "oidcIssuerUrl": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken'))), '2024-10-01').oidcIssuerProfile.issuerURL]"
+            },
+            "clusterFqdn": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerService/managedClusters', format('aks-groundwork-{0}', parameters('resourceToken'))), '2024-10-01').fqdn]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity')]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-observability')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-registry')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-foundry",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('foundryResourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          },
+          "controlPlanePrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.controlPlanePrincipalId.value]"
+          },
+          "operatorPrincipalId": {
+            "value": "[parameters('operatorPrincipalId')]"
+          },
+          "modelCapacity": "[if(variables('isProduction'), createObject('value', 30), createObject('value', 10))]"
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "15156158637258161545"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Deterministic suffix."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            },
+            "controlPlanePrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the control-plane workload identity, the only caller of this agent."
+              }
+            },
+            "operatorPrincipalId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Principal ID of the human operator running azd, for local plan-generation verification during development. Empty skips the grant."
+              }
+            },
+            "modelCapacity": {
+              "type": "int",
+              "defaultValue": 10,
+              "minValue": 1,
+              "metadata": {
+                "description": "GPT-4o GlobalStandard capacity, in units of 1,000 tokens/minute."
+              }
+            }
+          },
+          "variables": {
+            "accountName": "[format('foundry-gw-{0}', parameters('resourceToken'))]",
+            "projectName": "groundwork-planning",
+            "modelDeploymentName": "gpt-5-1",
+            "foundryAgentConsumerRoleId": "eed3b665-ab3a-47b6-8f48-c9382fb1dad6",
+            "cognitiveServicesOpenAIUserId": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd",
+            "cognitiveServicesUserId": "a97b65f3-24c7-4388-baec-2e87135dc908",
+            "foundryUserRoleId": "53ca6127-db72-4b80-b1b0-d745d6d5456d"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.CognitiveServices/accounts",
+              "apiVersion": "2025-12-01",
+              "name": "[variables('accountName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "AIServices",
+              "sku": {
+                "name": "S0"
+              },
+              "properties": {
+                "allowProjectManagement": true,
+                "customSubDomainName": "[variables('accountName')]",
+                "disableLocalAuth": true,
+                "publicNetworkAccess": "Enabled"
+              }
+            },
+            {
+              "type": "Microsoft.CognitiveServices/accounts/projects",
+              "apiVersion": "2025-12-01",
+              "name": "[format('{0}/{1}', variables('accountName'), variables('projectName'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {},
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.CognitiveServices/accounts/deployments",
+              "apiVersion": "2025-12-01",
+              "name": "[format('{0}/{1}', variables('accountName'), variables('modelDeploymentName'))]",
+              "sku": {
+                "name": "GlobalStandard",
+                "capacity": "[parameters('modelCapacity')]"
+              },
+              "properties": {
+                "model": {
+                  "format": "OpenAI",
+                  "name": "gpt-5.1",
+                  "version": "2025-11-13"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('controlPlanePrincipalId'), variables('foundryAgentConsumerRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('foundryAgentConsumerRoleId'))]",
+                "principalId": "[parameters('controlPlanePrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('controlPlanePrincipalId'), variables('cognitiveServicesOpenAIUserId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesOpenAIUserId'))]",
+                "principalId": "[parameters('controlPlanePrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('operatorPrincipalId'), variables('foundryAgentConsumerRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('foundryAgentConsumerRoleId'))]",
+                "principalId": "[parameters('operatorPrincipalId')]",
+                "principalType": "User"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('operatorPrincipalId'), variables('cognitiveServicesOpenAIUserId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesOpenAIUserId'))]",
+                "principalId": "[parameters('operatorPrincipalId')]",
+                "principalType": "User"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('controlPlanePrincipalId'), variables('cognitiveServicesUserId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesUserId'))]",
+                "principalId": "[parameters('controlPlanePrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('controlPlanePrincipalId'), variables('foundryUserRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('foundryUserRoleId'))]",
+                "principalId": "[parameters('controlPlanePrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('operatorPrincipalId'), variables('cognitiveServicesUserId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesUserId'))]",
+                "principalId": "[parameters('operatorPrincipalId')]",
+                "principalType": "User"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('operatorPrincipalId'), variables('foundryUserRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('foundryUserRoleId'))]",
+                "principalId": "[parameters('operatorPrincipalId')]",
+                "principalType": "User"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "accountName": {
+              "type": "string",
+              "value": "[variables('accountName')]"
+            },
+            "projectName": {
+              "type": "string",
+              "value": "[variables('projectName')]"
+            },
+            "modelDeploymentName": {
+              "type": "string",
+              "value": "[variables('modelDeploymentName')]"
+            },
+            "projectEndpoint": {
+              "type": "string",
+              "value": "[format('https://{0}.services.ai.azure.com/api/projects/{1}', reference(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), '2025-12-01').customSubDomainName, variables('projectName'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-speech",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          },
+          "controlPlanePrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.controlPlanePrincipalId.value]"
+          },
+          "operatorPrincipalId": {
+            "value": "[parameters('operatorPrincipalId')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "18112141159767423301"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Deterministic suffix."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            },
+            "controlPlanePrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the control-plane workload identity, the only caller of Voice Live."
+              }
+            },
+            "operatorPrincipalId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Principal ID of the human operator running azd, for local voice verification during development. Empty skips the grant."
+              }
+            }
+          },
+          "variables": {
+            "accountName": "[format('speech-gw-{0}', parameters('resourceToken'))]",
+            "cognitiveServicesSpeechUserRoleId": "f2dc8367-1007-4938-bd23-fe263f013447"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.CognitiveServices/accounts",
+              "apiVersion": "2025-12-01",
+              "name": "[variables('accountName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "SpeechServices",
+              "sku": {
+                "name": "S0"
+              },
+              "properties": {
+                "customSubDomainName": "[variables('accountName')]",
+                "disableLocalAuth": true,
+                "publicNetworkAccess": "Enabled"
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('controlPlanePrincipalId'), variables('cognitiveServicesSpeechUserRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesSpeechUserRoleId'))]",
+                "principalId": "[parameters('controlPlanePrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            },
+            {
+              "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('operatorPrincipalId'), variables('cognitiveServicesSpeechUserRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesSpeechUserRoleId'))]",
+                "principalId": "[parameters('operatorPrincipalId')]",
+                "principalType": "User"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "accountName": {
+              "type": "string",
+              "value": "[variables('accountName')]"
+            },
+            "endpoint": {
+              "type": "string",
+              "value": "[format('https://{0}.cognitiveservices.azure.com', reference(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), '2025-12-01').customSubDomainName)]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "groundwork-email",
+      "resourceGroup": "[format('rg-{0}', parameters('environmentName'))]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          },
+          "tags": {
+            "value": "[variables('tags')]"
+          },
+          "orchestratorPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.orchestratorPrincipalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.43.8.12551",
+              "templateHash": "7440865319709150416"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Deterministic suffix."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Tags applied to every resource."
+              }
+            },
+            "orchestratorPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the orchestrator identity. Granted Contributor on the Communication Service so it can send email without a key."
+              }
+            }
+          },
+          "variables": {
+            "contributorRoleId": "b24988ac-6180-42a0-ab88-20f7382dd24c"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Communication/emailServices",
+              "apiVersion": "2023-04-01",
+              "name": "[format('acs-email-gw-{0}', parameters('resourceToken'))]",
+              "location": "global",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "dataLocation": "Australia"
+              }
+            },
+            {
+              "type": "Microsoft.Communication/emailServices/domains",
+              "apiVersion": "2023-04-01",
+              "name": "[format('{0}/{1}', format('acs-email-gw-{0}', parameters('resourceToken')), 'AzureManagedDomain')]",
+              "location": "global",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "domainManagement": "AzureManaged"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Communication/emailServices', format('acs-email-gw-{0}', parameters('resourceToken')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Communication/communicationServices",
+              "apiVersion": "2023-04-01",
+              "name": "[format('acs-gw-{0}', parameters('resourceToken'))]",
+              "location": "global",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "dataLocation": "Australia",
+                "linkedDomains": [
+                  "[resourceId('Microsoft.Communication/emailServices/domains', format('acs-email-gw-{0}', parameters('resourceToken')), 'AzureManagedDomain')]"
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Communication/emailServices/domains', format('acs-email-gw-{0}', parameters('resourceToken')), 'AzureManagedDomain')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Communication/communicationServices', format('acs-gw-{0}', parameters('resourceToken')))]",
+              "name": "[guid(resourceId('Microsoft.Communication/communicationServices', format('acs-gw-{0}', parameters('resourceToken'))), parameters('orchestratorPrincipalId'), variables('contributorRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('contributorRoleId'))]",
+                "principalId": "[parameters('orchestratorPrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Communication/communicationServices', format('acs-gw-{0}', parameters('resourceToken')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "communicationServiceEndpoint": {
+              "type": "string",
+              "value": "[format('https://{0}.communication.azure.com', format('acs-gw-{0}', parameters('resourceToken')))]"
+            },
+            "senderAddress": {
+              "type": "string",
+              "value": "[format('DoNotReply@{0}', reference(resourceId('Microsoft.Communication/emailServices/domains', format('acs-email-gw-{0}', parameters('resourceToken')), 'AzureManagedDomain'), '2023-04-01').mailFromSenderDomain)]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', format('rg-{0}', parameters('environmentName')))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "AZURE_TENANT_ID": {
+      "type": "string",
+      "value": "[subscription().tenantId]"
+    },
+    "AZURE_LOCATION": {
+      "type": "string",
+      "value": "[parameters('location')]"
+    },
+    "AZURE_RESOURCE_GROUP": {
+      "type": "string",
+      "value": "[format('rg-{0}', parameters('environmentName'))]"
+    },
+    "AZURE_AKS_CLUSTER_NAME": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-aks'), '2025-04-01').outputs.clusterName.value]"
+    },
+    "AZURE_CONTAINER_REGISTRY_ENDPOINT": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-registry'), '2025-04-01').outputs.loginServer.value]"
+    },
+    "AZURE_CONTAINER_REGISTRY_NAME": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-registry'), '2025-04-01').outputs.registryName.value]"
+    },
+    "GROUNDWORK_COSMOS_ENDPOINT": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-cosmos'), '2025-04-01').outputs.endpoint.value]"
+    },
+    "GROUNDWORK_STORAGE_ACCOUNT_URL": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-storage'), '2025-04-01').outputs.blobEndpoint.value]"
+    },
+    "GROUNDWORK_KEY_VAULT_URI": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-keyvault'), '2025-04-01').outputs.vaultUri.value]"
+    },
+    "GROUNDWORK_STORAGE_REGION": {
+      "type": "string",
+      "value": "[parameters('location')]"
+    },
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-observability'), '2025-04-01').outputs.appInsightsConnectionString.value]"
+    },
+    "GROUNDWORK_FOUNDRY_PROJECT_ENDPOINT": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-foundry'), '2025-04-01').outputs.projectEndpoint.value]"
+    },
+    "GROUNDWORK_FOUNDRY_MODEL_DEPLOYMENT": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-foundry'), '2025-04-01').outputs.modelDeploymentName.value]"
+    },
+    "GROUNDWORK_CONTROLPLANE_CLIENT_ID": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.controlPlaneClientId.value]"
+    },
+    "GROUNDWORK_ORCHESTRATOR_CLIENT_ID": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.orchestratorClientId.value]"
+    },
+    "GROUNDWORK_ORCHESTRATOR_PRINCIPAL_ID": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-identity'), '2025-04-01').outputs.orchestratorPrincipalId.value]"
+    },
+    "GROUNDWORK_ACS_EMAIL_ENDPOINT": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-email'), '2025-04-01').outputs.communicationServiceEndpoint.value]"
+    },
+    "GROUNDWORK_ACS_EMAIL_SENDER_ADDRESS": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-email'), '2025-04-01').outputs.senderAddress.value]"
+    },
+    "GROUNDWORK_VOICE_LIVE_ENDPOINT": {
+      "type": "string",
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, format('rg-{0}', parameters('environmentName'))), 'Microsoft.Resources/deployments', 'groundwork-speech'), '2025-04-01').outputs.endpoint.value]"
+    }
+  }
+}

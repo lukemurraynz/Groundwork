@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "operatorPrincipalId": {
+      "value": "${AZURE_PRINCIPAL_ID=}"
+    },
+    "kubernetesVersion": {
+      "value": "${GROUNDWORK_KUBERNETES_VERSION=1.35}"
+    },
+    "costProfile": {
+      "value": "${GROUNDWORK_COST_PROFILE=dev}"
+    },
+    "recoverKeyVault": {
+      "value": "${GROUNDWORK_RECOVER_KEYVAULT=false}"
+    },
+    "foundryAccountTokenOverride": {
+      "value": "${GROUNDWORK_FOUNDRY_ACCOUNT_TOKEN_OVERRIDE=}"
+    }
+  }
+}

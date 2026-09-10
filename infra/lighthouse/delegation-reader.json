@@ -1,0 +1,92 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "12480850217056899254"
+    }
+  },
+  "parameters": {
+    "mspOfferName": {
+      "type": "string",
+      "defaultValue": "Groundwork Platform readiness assessment (read-only)",
+      "metadata": {
+        "description": "Display name for this read-only delegation, shown to the customer in the Azure portal (Service providers blade)."
+      }
+    },
+    "mspOfferDescription": {
+      "type": "string",
+      "defaultValue": "Groundwork Platform: READ-ONLY access to assess your subscription against eight landing-zone design areas and produce a costed readiness report. No write capability is granted.",
+      "metadata": {
+        "description": "Explains what this delegation is for."
+      }
+    },
+    "managedByTenantId": {
+      "type": "string",
+      "metadata": {
+        "description": "Groundwork's own Entra tenant ID — the managing tenant this subscription is delegated to."
+      }
+    },
+    "principalId": {
+      "type": "string",
+      "metadata": {
+        "description": "Object ID of the Groundwork identity (in Groundwork's own tenant) that receives Reader on this subscription."
+      }
+    },
+    "principalIdDisplayName": {
+      "type": "string",
+      "defaultValue": "Groundwork Platform assessment identity",
+      "metadata": {
+        "description": "Display name for principalId."
+      }
+    }
+  },
+  "variables": {
+    "readerRoleDefinitionId": "acdd72a7-3385-48ef-bd42-f606fba81ae7",
+    "authorizations": [
+      {
+        "principalId": "[parameters('principalId')]",
+        "principalIdDisplayName": "[parameters('principalIdDisplayName')]",
+        "roleDefinitionId": "[variables('readerRoleDefinitionId')]"
+      }
+    ],
+    "registrationName": "[guid(parameters('mspOfferName'))]",
+    "registrationAssignmentName": "[guid(parameters('mspOfferName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ManagedServices/registrationDefinitions",
+      "apiVersion": "2020-02-01-preview",
+      "name": "[variables('registrationName')]",
+      "properties": {
+        "registrationDefinitionName": "[parameters('mspOfferName')]",
+        "description": "[parameters('mspOfferDescription')]",
+        "managedByTenantId": "[parameters('managedByTenantId')]",
+        "authorizations": "[variables('authorizations')]"
+      }
+    },
+    {
+      "type": "Microsoft.ManagedServices/registrationAssignments",
+      "apiVersion": "2020-02-01-preview",
+      "name": "[variables('registrationAssignmentName')]",
+      "properties": {
+        "registrationDefinitionId": "[subscriptionResourceId('Microsoft.ManagedServices/registrationDefinitions', variables('registrationName'))]"
+      },
+      "dependsOn": [
+        "[subscriptionResourceId('Microsoft.ManagedServices/registrationDefinitions', variables('registrationName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "registrationDefinitionId": {
+      "type": "string",
+      "value": "[subscriptionResourceId('Microsoft.ManagedServices/registrationDefinitions', variables('registrationName'))]"
+    },
+    "registrationAssignmentId": {
+      "type": "string",
+      "value": "[subscriptionResourceId('Microsoft.ManagedServices/registrationAssignments', variables('registrationAssignmentName'))]"
+    }
+  }
+}

@@ -1,0 +1,144 @@
+# Dev/sandbox Fabric platform — ADR-0010's first multi-blueprint catalogue entry.
+#
+# Deliberately smaller than standard-production-fabric: F8 capacity, no Key Vault private-endpoint
+# requirement, and a non-production default environment. Still loaded and validated exactly the same
+# way as every other blueprint: declarative artefact first, no code path special-casing by id.
+
+blueprintId: dev-sandbox
+version: 0.1.0
+displayName: Groundwork Dev Sandbox
+defaultFabricSku: F8
+
+iacArtefacts:
+  - module: avm/res/resources/resource-group
+    version: 0.4.0
+    source: br/public
+  - module: avm/res/network/virtual-network
+    version: 0.5.1
+    source: br/public
+  - module: avm/res/operational-insights/workspace
+    version: 0.7.0
+    source: br/public
+  - module: avm/res/insights/component
+    version: 0.4.1
+    source: br/public
+  - module: avm/res/managed-identity/user-assigned-identity
+    version: 0.4.0
+    source: br/public
+
+requiredPermissions:
+  - role: Contributor
+    scope: subscription
+    stage: infrastructure
+    justification: >-
+      Creating the resource group, virtual network, Log Analytics workspace, Application Insights,
+      and user-assigned managed identity requires subscription-scope writes across multiple Azure
+      resource providers. Scoped to the target subscription only.
+  - role: Reader
+    scope: subscription
+    stage: networking
+    justification: >-
+      Verification-only confirmation that the network resources created by the infrastructure stage
+      exist and remain reachable. No write permission is needed or granted for this stage.
+  - role: Managed Identity Contributor
+    scope: resourceGroup
+    stage: identity
+    justification: >-
+      Creating and updating the user-assigned managed identity and its federated credential in the
+      deployment resource group. Deliberately narrower than Owner because no role assignment write is needed.
+  - role: Fabric Administrator
+    scope: capacity
+    stage: fabric
+    justification: >-
+      Provisioning the sandbox Fabric capacity and workspace. Scoped to the capacity created by this
+      deployment rather than tenant-wide Fabric administration.
+  - role: Monitoring Contributor
+    scope: resourceGroup
+    stage: monitoring
+    justification: >-
+      Configuring diagnostic settings and alerts for the deployed sandbox resources in their target
+      resource group.
+  - role: Project Administrator
+    scope: azureDevOpsProject
+    stage: devops_project
+    justification: >-
+      Creating the Azure DevOps project and importing the platform repository into the customer
+      project. Scoped to the created project only, with no organisation-wide administration.
+
+stages:
+  - name: devops_project
+    dependsOn: []
+    retryBudget: 3
+    idempotenceContract: >-
+      Project creation is keyed on project name within the organisation. Re-running finds the
+      existing project and repository and returns no_op without re-importing.
+    recoveryPath: >-
+      Forward-fix. A partially created project is completed on retry; it is not deleted because that
+      could discard customer work already committed to it.
+
+  - name: infrastructure
+    dependsOn:
+      - devops_project
+    retryBudget: 3
+    idempotenceContract: >-
+      Deployed through an Azure deployment stack. Re-running against converged state produces an
+      empty what-if diff and returns no_op.
+    recoveryPath: >-
+      Halt and preserve. Automatic teardown is not attempted; any destructive remediation requires
+      separate explicit approval because deleting deployed customer infrastructure is irreversible.
+
+  - name: identity
+    dependsOn:
+      - infrastructure
+    retryBudget: 3
+    idempotenceContract: >-
+      The federated identity credential is keyed by a deterministic name derived from the
+      subscription id. Re-running against matching values returns no_op; a missing or drifted
+      credential is rewritten to the same values.
+    recoveryPath: >-
+      Forward-fix. A missing or drifted federated credential is recreated on retry.
+
+  - name: networking
+    dependsOn:
+      - infrastructure
+    retryBudget: 3
+    idempotenceContract: >-
+      Read-only verification of the sandbox virtual network resources created by the infrastructure
+      stage. Every run re-checks live state and returns no_op because this stage writes nothing.
+    recoveryPath: >-
+      Retry. Missing or incomplete network resources mean the infrastructure stage has not yet fully
+      converged and should be rechecked rather than changed here.
+
+  - name: fabric
+    dependsOn:
+      - networking
+      - identity
+    retryBudget: 3
+    minimumRetryIntervalSeconds: 900
+    idempotenceContract: >-
+      Capacity is keyed by name and region; the workspace by name within that capacity. Re-running
+      returns no_op, and managed private endpoint recreation is not retried inside the 15-minute wait window.
+    recoveryPath: >-
+      Halt and preserve. Fabric capacity is billable to the customer, so automatic teardown is not
+      performed; any destructive remediation requires separate explicit approval.
+
+  - name: monitoring
+    dependsOn:
+      - fabric
+    retryBudget: 3
+    idempotenceContract: >-
+      Diagnostic settings and alert rules are keyed by name against each target resource.
+      Re-running returns no_op.
+    recoveryPath: >-
+      Forward-fix. Missing monitoring configuration is added on retry.
+
+  - name: validation_tests
+    dependsOn:
+      - monitoring
+    retryBudget: 2
+    idempotenceContract: >-
+      Read-only. Executes health checks and validation tests against the deployed sandbox platform,
+      so re-running is always safe.
+    recoveryPath: >-
+      Retry. A validation test that did not execute is reported as failed, never passed, so retry
+      budget exhaustion halts the deployment rather than completing it.

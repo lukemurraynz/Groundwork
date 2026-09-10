@@ -1,0 +1,176 @@
+"""Groundwork shared contracts — the deterministic-execution boundary (ADR-0001).
+
+This package defines every structure that crosses between an AI agent and deterministic
+orchestration. It deliberately has **no I/O and no Azure or model SDK imports**, for two reasons:
+
+1. The boundary can be tested with no cloud dependency, so the tests that matter most are also the
+   fastest and most reliable in the suite.
+2. It cannot accidentally acquire one. ``tests/unit/test_import_boundaries.py`` asserts this, so a
+   future change that reaches for an Azure client here fails CI rather than passing review.
+
+The load-bearing type is :class:`DeploymentPlan`. A model may emit that object and nothing else. If
+it fails validation, the request fails — it is never coerced, never retried against a loosened
+schema, and never partially executed (FR-011).
+"""
+
+from groundwork_contracts.approval import (
+    ActorKind,
+    Approval,
+    ApprovalChannel,
+    ApprovedParameters,
+    ApprovingIdentity,
+    CostComponent,
+    CostComponentKind,
+    CostEstimate,
+    PendingApproval,
+    SecondApproval,
+    ThresholdPolicy,
+)
+from groundwork_contracts.audit import (
+    AUDIT_RETENTION,
+    ActorIdentity,
+    ActorType,
+    AuditOutcome,
+    AuditRecord,
+    AuthorityChain,
+    DeploymentReport,
+    DeploymentStageRecord,
+    IdempotenceOutcome,
+    RecoveryPath,
+    ReportOutcome,
+    StageError,
+    StageStatus,
+    StageSummary,
+)
+from groundwork_contracts.blueprint import (
+    BlueprintStage,
+    DesignAreaName,
+    FabricCapacitySku,
+    IacArtefact,
+    PlatformBlueprint,
+    RequiredPermission,
+)
+from groundwork_contracts.deployment import (
+    Checkpoint,
+    Deployment,
+    DeploymentStatus,
+    SubscriptionLease,
+)
+from groundwork_contracts.errors import (
+    ContractViolation,
+    PlanIntegrityError,
+    PlanValidationError,
+)
+from groundwork_contracts.plan import (
+    PLAN_VALIDITY,
+    SCHEMA_VERSION,
+    ApprovedRegion,
+    Clarification,
+    CostEstimateRef,
+    DeploymentPlan,
+    Environment,
+    PlanResource,
+    RiskAssessment,
+    RiskFinding,
+    RiskSeverity,
+    SealedDeploymentPlan,
+    StageDependency,
+    ValidityWindow,
+)
+from groundwork_contracts.readiness import (
+    AssertionSeverity,
+    DesignArea,
+    DriftSummary,
+    DriftVerdict,
+    LandingZoneContract,
+    ReadinessAssertion,
+    ReadinessSummary,
+    ValidationResult,
+    ValidationStatus,
+)
+from groundwork_contracts.tenant import (
+    AUSTRALIAN_REGIONS,
+    CONVERSATION_RETENTION,
+    ConsentState,
+    ConversationChannel,
+    ConversationRecord,
+    ConversationTurn,
+    CustomerTenant,
+    DataClassification,
+    OffshoreInferenceConsent,
+    SubscriptionEntitlement,
+)
+
+__all__ = [
+    "AUDIT_RETENTION",
+    "AUSTRALIAN_REGIONS",
+    "CONVERSATION_RETENTION",
+    "PLAN_VALIDITY",
+    "SCHEMA_VERSION",
+    "ActorIdentity",
+    "ActorKind",
+    "ActorType",
+    "Approval",
+    "ApprovalChannel",
+    "ApprovedParameters",
+    "ApprovedRegion",
+    "ApprovingIdentity",
+    "AssertionSeverity",
+    "AuditOutcome",
+    "AuditRecord",
+    "AuthorityChain",
+    "BlueprintStage",
+    "Checkpoint",
+    "Clarification",
+    "ConsentState",
+    "ContractViolation",
+    "ConversationChannel",
+    "ConversationRecord",
+    "ConversationTurn",
+    "CostComponent",
+    "CostComponentKind",
+    "CostEstimate",
+    "CostEstimateRef",
+    "CustomerTenant",
+    "DataClassification",
+    "Deployment",
+    "DeploymentPlan",
+    "DeploymentReport",
+    "DeploymentStageRecord",
+    "DeploymentStatus",
+    "DesignArea",
+    "DesignAreaName",
+    "DriftSummary",
+    "DriftVerdict",
+    "Environment",
+    "FabricCapacitySku",
+    "IacArtefact",
+    "IdempotenceOutcome",
+    "LandingZoneContract",
+    "OffshoreInferenceConsent",
+    "PendingApproval",
+    "PlanIntegrityError",
+    "PlanResource",
+    "PlanValidationError",
+    "PlatformBlueprint",
+    "ReadinessAssertion",
+    "ReadinessSummary",
+    "RecoveryPath",
+    "ReportOutcome",
+    "RequiredPermission",
+    "RiskAssessment",
+    "RiskFinding",
+    "RiskSeverity",
+    "SealedDeploymentPlan",
+    "SecondApproval",
+    "StageDependency",
+    "StageError",
+    "StageStatus",
+    "StageSummary",
+    "SubscriptionEntitlement",
+    "SubscriptionLease",
+    "ThresholdPolicy",
+    "ValidationResult",
+    "ValidationStatus",
+    "ValidityWindow",
+]

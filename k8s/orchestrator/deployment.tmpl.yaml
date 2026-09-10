@@ -1,0 +1,180 @@
+# Groundwork orchestrator (execution worker).
+#
+# Runs on the `executor` node pool, separate from the control plane, so deployment load cannot
+# starve the planning surface (FR-045c).
+#
+# Its own service account and workload identity. The orchestrator writes to customer tenants; the
+# control plane does not. Keeping the identities distinct means the ADR-0001 authority split is
+# enforced by Azure RBAC rather than by code review alone — a compromised control plane still
+# cannot write to a tenant.
+#
+# .tmpl.yaml, not .yaml: azd only performs Go-template Env-variable substitution on manifests with
+# this suffix (verified 2026-07-31 against Azure/azure-dev's own test fixture,
+# cli/azd/test/testdata/k8s/apply/templates/deployment.tmpl.yaml). A plain .yaml file is applied
+# byte-for-byte — every dollar-brace placeholder below would land in the cluster as a literal,
+# unresolved string.
+#
+# Note for future edits: this comment itself must not contain literal double-curly-brace syntax —
+# azd's template engine parses the whole file, comments included, so writing the real token here
+# breaks parsing (bad character U+002A '*', discovered the hard way).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator
+  namespace: groundwork
+  annotations:
+    azure.workload.identity/client-id: {{.Env.GROUNDWORK_ORCHESTRATOR_CLIENT_ID}}
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: groundwork
+  labels:
+    app: orchestrator
+    groundwork.io/tier: executor
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: orchestrator
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        groundwork.io/tier: executor
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: orchestrator
+      nodeSelector:
+        groundwork.io/tier: executor
+      # 600s matches the cluster autoscaler's max-graceful-termination-sec. An evicted worker must
+      # be able to reach a durable checkpoint before it dies; FR-035 and SC-010 require resuming
+      # without repeating a completed stage, and an abrupt kill mid-stage makes that harder than it
+      # needs to be.
+      terminationGracePeriodSeconds: 600
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: orchestrator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: orchestrator
+          image: {{.Env.SERVICE_ORCHESTRATOR_IMAGE_NAME}}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: AZURE_ENV_NAME
+              value: {{.Env.AZURE_ENV_NAME}}
+            - name: AZURE_LOCATION
+              value: {{.Env.AZURE_LOCATION}}
+            - name: GROUNDWORK_COSMOS_ENDPOINT
+              value: {{.Env.GROUNDWORK_COSMOS_ENDPOINT}}
+            - name: GROUNDWORK_STORAGE_ACCOUNT_URL
+              value: {{.Env.GROUNDWORK_STORAGE_ACCOUNT_URL}}
+            - name: GROUNDWORK_KEY_VAULT_URI
+              value: {{.Env.GROUNDWORK_KEY_VAULT_URI}}
+            - name: GROUNDWORK_STORAGE_REGION
+              value: {{.Env.GROUNDWORK_STORAGE_REGION}}
+            - name: GROUNDWORK_APPROVAL_THRESHOLD_AUD
+              value: "{{.Env.GROUNDWORK_APPROVAL_THRESHOLD_AUD}}"
+            - name: GROUNDWORK_APPROVER_ROLE
+              value: {{.Env.GROUNDWORK_APPROVER_ROLE}}
+            - name: GROUNDWORK_TENANT_CONCURRENCY_CAP
+              value: "{{.Env.GROUNDWORK_TENANT_CONCURRENCY_CAP}}"
+            - name: GROUNDWORK_MAX_CONCURRENT_DEPLOYMENTS
+              value: "{{.Env.GROUNDWORK_MAX_CONCURRENT_DEPLOYMENTS}}"
+            # Optional: defaults on in settings.py when unset or empty (ADR-0011). Override per
+            # environment with `azd env set GROUNDWORK_REQUIRE_STEP_UP_APPROVAL false`.
+            - name: GROUNDWORK_REQUIRE_STEP_UP_APPROVAL
+              value: "{{.Env.GROUNDWORK_REQUIRE_STEP_UP_APPROVAL}}"
+            # This worker's own identity — recorded as the actor on every audit record the
+            # queue-consumption loop's Sequencer writes (engine/sequencer.py). Same output,
+            # infra/main.bicep's GROUNDWORK_ORCHESTRATOR_PRINCIPAL_ID, the control plane's own
+            # deployment already reads for its readiness checks.
+            - name: GROUNDWORK_ORCHESTRATOR_PRINCIPAL_ID
+              value: {{.Env.GROUNDWORK_ORCHESTRATOR_PRINCIPAL_ID}}
+            # Engagement-data fallbacks — per-tenant primary source is the CustomerTenant record,
+            # resolved per deployment by the queue loop. Both are optional worker-wide now: a
+            # deployment whose tenant carries neither value and has no fallback here is declined
+            # per-deployment (AWAITING_TENANT_CONFIG), never blocks worker startup.
+            - name: GROUNDWORK_FABRIC_CAPACITY_ADMIN_UPN
+              value: {{.Env.GROUNDWORK_FABRIC_CAPACITY_ADMIN_UPN}}
+            - name: GROUNDWORK_DEVOPS_ORGANIZATION_URL
+              value: {{.Env.GROUNDWORK_DEVOPS_ORGANIZATION_URL}}
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              value: {{.Env.APPLICATIONINSIGHTS_CONNECTION_STRING}}
+            # ACS Email for deployment-outcome notifications (FR-051). Both variables are required
+            # to construct _TenantNotifier. When either is absent the worker skips notification
+            # rather than refusing to start — matching OrchestratorSettings.acs_email_endpoint's
+            # Optional pattern. Values come from infra/main.bicep's email module outputs.
+            - name: GROUNDWORK_ACS_EMAIL_ENDPOINT
+              value: {{.Env.GROUNDWORK_ACS_EMAIL_ENDPOINT}}
+            - name: GROUNDWORK_ACS_EMAIL_SENDER_ADDRESS
+              value: {{.Env.GROUNDWORK_ACS_EMAIL_SENDER_ADDRESS}}
+            # Writes to customer tenants are explicitly enabled here and nowhere else. A worker
+            # started without this is read-only, so a misconfigured local or test run cannot write
+            # into a tenant by accident.
+            - name: GROUNDWORK_ALLOW_WRITES
+              value: "true"
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orchestrator
+  namespace: groundwork
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: orchestrator

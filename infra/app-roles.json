@@ -1,0 +1,26 @@
+[
+  {
+    "allowedMemberTypes": ["User", "Application"],
+    "description": "May request deployment plans and submit deployments for approval (FR-005, FR-010).",
+    "displayName": "Groundwork Requester",
+    "id": "8f6a9c1e-2b3d-4e5f-9a1b-6c7d8e9f0a1b",
+    "isEnabled": true,
+    "value": "Groundwork.Requester"
+  },
+  {
+    "allowedMemberTypes": ["User", "Application"],
+    "description": "May approve a deployment plan, including as the required second approver above the cost threshold (FR-020, FR-020a).",
+    "displayName": "Groundwork Approver",
+    "id": "1d2e3f4a-5b6c-4d7e-8f9a-0b1c2d3e4f5a",
+    "isEnabled": true,
+    "value": "Groundwork.Approver"
+  },
+  {
+    "allowedMemberTypes": ["User", "Application"],
+    "description": "May perform break-glass operational access - reading audit records, reports, and health status (FR-046, verification-protocol).",
+    "displayName": "Groundwork Operator",
+    "id": "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b",
+    "isEnabled": true,
+    "value": "Groundwork.Operator"
+  }
+]

@@ -1,0 +1,96 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+# Groundwork platform definition for Azure Developer CLI (PD-004).
+#
+# Host is AKS, per PD-002 (see ADR-0001). Not Container Apps — the platform requires
+# zone-redundant node pools, AKS workload identity, and independently scalable control-plane
+# and execution tiers.
+#
+# Two services, two workload identities, on purpose. The control plane may call a model and holds
+# read-only access to customer tenants. The orchestrator writes to customer tenants and never imports
+# a model library. Keeping them as separate azd services means that authority split is enforced at
+# deployment time, not merely in code review.
+#
+# See docs/adr/0001-ai-plans-deterministic-code-executes.md for the split.
+
+name: groundwork
+metadata:
+  template: groundwork@0.1.0
+
+infra:
+  provider: bicep
+  path: infra
+  module: main
+
+services:
+  controlplane:
+    project: ./src/groundwork_controlplane
+    language: py
+    host: aks
+    k8s:
+      deploymentPath: ../../k8s/controlplane
+    docker:
+      path: ../../docker/controlplane.Dockerfile
+      context: ../..
+      # Built by ACR Tasks, not locally. Removes the local Docker daemon as a build dependency,
+      # which also means the build environment is the same for everyone rather than whatever
+      # happens to be installed on the machine that ran azd.
+      remoteBuild: true
+
+  orchestrator:
+    project: ./src/groundwork_orchestrator
+    language: py
+    host: aks
+    k8s:
+      deploymentPath: ../../k8s/orchestrator
+    docker:
+      path: ../../docker/orchestrator.Dockerfile
+      context: ../..
+      remoteBuild: true
+
+hooks:
+  # Fails provisioning early if the target subscription or region cannot satisfy the platform,
+  # rather than discovering it halfway through a deployment.
+  preprovision:
+    posix:
+      shell: sh
+      run: ./scripts/preprovision.sh
+      interactive: false
+      continueOnError: false
+    windows:
+      shell: pwsh
+      run: ./scripts/preprovision.ps1
+      interactive: false
+      continueOnError: false
+
+  # Creates the multi-tenant Entra application (FR-006) that customers consent to and that
+  # api/auth.py validates inbound tokens against. Paired with predown below so `azd up`/`azd down`
+  # fully own its lifecycle — an Entra app registration has no resource group, so it would otherwise
+  # outlive every `azd down` permanently. continueOnError is false: if this fails, the control plane
+  # would start with no way to validate a token, which is worse than provisioning failing loudly.
+  postprovision:
+    posix:
+      shell: sh
+      run: ./scripts/postprovision.sh
+      interactive: false
+      continueOnError: false
+    windows:
+      shell: pwsh
+      run: ./scripts/postprovision.ps1
+      interactive: false
+      continueOnError: false
+
+  # Removes the Entra application. continueOnError is true here, deliberately the opposite of
+  # postprovision: a failure to delete the app registration must not block deleting the resource
+  # group underneath it. The script warns loudly and leaves manual cleanup instructions instead.
+  predown:
+    posix:
+      shell: sh
+      run: ./scripts/predown.sh
+      interactive: false
+      continueOnError: true
+    windows:
+      shell: pwsh
+      run: ./scripts/predown.ps1
+      interactive: false
+      continueOnError: true

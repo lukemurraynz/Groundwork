@@ -1,0 +1,62 @@
+# azd environment state — contains subscription and resource identifiers, never commit
+.azure/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.claude/
+htmlcov/
+
+# Environment files — no credential or connection string is ever committed
+*.env
+.env
+.env.*
+!.env.example
+
+# Bicep build output — ad hoc/local builds only; the checked-in compiled JSON
+# siblings documented in CONTRIBUTING.md (infra/main.json, infra/modules/*.json,
+# infra/lighthouse/*.json, infra/blueprints/**/*.json) are intentionally tracked
+*.json.bicepbuild
+
+# Agent/tooling runtime state — session checkpoints from coding-agent harnesses, not project source
+.sisyphus/
+/.playwright-mcp
+.omo/
+PowerShellEditorServices.json
+
+# Logs and local run output — never a source file, and can carry data from a live run
+*.log
+logs/
+coverage.xml
+.hypothesis/
+
+# Local credentials — never committed, whatever their format or filename
+*.pem
+*.key
+*.pfx
+kubeconfig
+*.kubeconfig
+secrets.json
+local.settings.json
+
+# Editor/IDE state — personal, not project configuration
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.orig
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

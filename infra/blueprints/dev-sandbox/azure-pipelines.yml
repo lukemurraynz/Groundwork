@@ -1,0 +1,135 @@
+# Groundwork platform release pipeline — dev/sandbox blueprint.
+
+trigger: none
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+  - name: applyChanges
+    displayName: Apply changes (unchecked runs validate-only; no changes are made)
+    type: boolean
+    default: false
+  - name: location
+    displayName: Azure region
+    type: string
+    default: australiaeast
+  - name: resourceGroupName
+    displayName: Target resource group name
+    type: string
+  - name: resourceToken
+    displayName: Deterministic resource-name token for this subscription
+    type: string
+  - name: provisionFabric
+    displayName: Provision Fabric capacity and workspace
+    type: boolean
+    default: false
+  - name: fabricCapacitySku
+    displayName: Fabric capacity SKU
+    type: string
+    default: F8
+  - name: capacityAdminUpn
+    displayName: UPN of the Fabric capacity administrator (must be a user in this tenant)
+    type: string
+  - name: validationPrincipalObjectId
+    displayName: Object id granted workspace Admin so post-deploy validation can read it
+    type: string
+    default: ''
+
+variables:
+  stackName: stack-groundwork-${{ parameters.resourceToken }}
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Validate deployment stack (no changes made)'
+    condition: eq('${{ parameters.applyChanges }}', 'False')
+    inputs:
+      azureSubscription: $(System.TeamProject)
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: '$(System.DefaultWorkingDirectory)'
+      inlineScript: |
+        set -euo pipefail
+        cat > stack.parameters.json <<JSON
+        {
+          "location": {"value": "${{ parameters.location }}"},
+          "resourceGroupName": {"value": "${{ parameters.resourceGroupName }}"},
+          "resourceToken": {"value": "${{ parameters.resourceToken }}"},
+          "tags": {"value": {"managed-by": "groundwork", "environment": "non-production"}}
+        }
+        JSON
+        az stack sub validate \
+          --name "$(stackName)" \
+          --location "${{ parameters.location }}" \
+          --template-file main.json \
+          --parameters stack.parameters.json \
+          --deny-settings-mode none \
+          --action-on-unmanage detachAll
+
+  - task: AzureCLI@2
+    displayName: 'Apply deployment stack'
+    condition: eq('${{ parameters.applyChanges }}', 'True')
+    inputs:
+      azureSubscription: $(System.TeamProject)
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: '$(System.DefaultWorkingDirectory)'
+      inlineScript: |
+        set -euo pipefail
+        cat > stack.parameters.json <<JSON
+        {
+          "location": {"value": "${{ parameters.location }}"},
+          "resourceGroupName": {"value": "${{ parameters.resourceGroupName }}"},
+          "resourceToken": {"value": "${{ parameters.resourceToken }}"},
+          "tags": {"value": {"managed-by": "groundwork", "environment": "non-production"}}
+        }
+        JSON
+        az stack sub create \
+          --name "$(stackName)" \
+          --location "${{ parameters.location }}" \
+          --template-file main.json \
+          --parameters stack.parameters.json \
+          --deny-settings-mode none \
+          --action-on-unmanage detachAll \
+          --yes
+        STACK_OUTPUTS=$(az stack sub show --name "$(stackName)" --query properties.outputs -o json | tr -d '\n')
+        echo "GROUNDWORK_STACK_OUTPUTS=$STACK_OUTPUTS"
+
+  - task: AzureCLI@2
+    displayName: 'Provision Fabric capacity and workspace'
+    condition: and(eq('${{ parameters.applyChanges }}', 'True'), eq('${{ parameters.provisionFabric }}', 'True'))
+    inputs:
+      azureSubscription: $(System.TeamProject)
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+        CAPACITY="fabricgw${{ parameters.resourceToken }}"
+        WORKSPACE="ws-groundwork-${{ parameters.resourceToken }}"
+
+        az rest --method PUT \
+          --url "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/${{ parameters.resourceGroupName }}/providers/Microsoft.Fabric/capacities/$CAPACITY?api-version=2023-11-01" \
+          --body "{\"location\":\"${{ parameters.location }}\",\"sku\":{\"name\":\"${{ parameters.fabricCapacitySku }}\",\"tier\":\"Fabric\"},\"properties\":{\"administration\":{\"members\":[\"${{ parameters.capacityAdminUpn }}\"]}}}" > /dev/null
+        for _ in $(seq 1 40); do
+          STATE=$(az rest --method GET --url "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/${{ parameters.resourceGroupName }}/providers/Microsoft.Fabric/capacities/$CAPACITY?api-version=2023-11-01" --query properties.provisioningState -o tsv)
+          [ "$STATE" = "Succeeded" ] && break
+          sleep 15
+        done
+        [ "$STATE" = "Succeeded" ] || { echo "capacity did not reach Succeeded (last: $STATE)"; exit 1; }
+
+        FTOK=$(az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv)
+        FABRIC="https://api.fabric.microsoft.com/v1"
+        AUTH="Authorization: Bearer $FTOK"
+        WORKSPACE_ID=$(curl -s -H "$AUTH" "$FABRIC/workspaces" | jq -r --arg n "$WORKSPACE" '.value[] | select(.displayName == $n) | .id')
+        if [ -z "$WORKSPACE_ID" ]; then
+          WORKSPACE_ID=$(curl -sf -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d "{\"displayName\":\"$WORKSPACE\",\"capacityId\":\"$CAPACITY\"}" \
+            "$FABRIC/workspaces" | jq -r '.id')
+        fi
+
+        if [ -n "${{ parameters.validationPrincipalObjectId }}" ]; then
+          curl -s -o /dev/null -w '%{http_code}' -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d "{\"principal\":{\"id\":\"${{ parameters.validationPrincipalObjectId }}\",\"type\":\"ServicePrincipal\"},\"role\":\"Admin\"}" \
+            "$FABRIC/workspaces/$WORKSPACE_ID/roleAssignments"
+        fi

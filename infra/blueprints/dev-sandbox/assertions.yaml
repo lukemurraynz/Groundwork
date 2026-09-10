@@ -1,0 +1,83 @@
+# Readiness assertions for the Groundwork Dev Sandbox blueprint.
+#
+# Reuses the same design-area coverage pattern as the standard blueprint so the same deterministic
+# checks can be constructed per blueprint id.
+
+contractVersion: 1.0.0
+
+assertions:
+  - assertionId: tenant.subscription-reachable
+    designArea: azure-billing-and-tenant
+    description: >-
+      The target subscription is reachable and its billing state permits new resource creation.
+    remediation: >-
+      Confirm the subscription ID is correct and that its billing state is Enabled, not Disabled,
+      Warned, PastDue, or Deleted.
+    severity: blocking
+
+  - assertionId: identity.deployment-identity-not-owner
+    designArea: identity-and-access-management
+    description: >-
+      The Groundwork deployment identity does not already hold the Owner role at subscription scope.
+    remediation: >-
+      Remove any standing Owner role assignment for the Groundwork deployment identity and rely on
+      stage-scoped grants during execution.
+    severity: advisory
+
+  - assertionId: fabric.service-principal-api-enabled
+    designArea: identity-and-access-management
+    description: >-
+      The deployment identity can authenticate to the Fabric public API for sandbox capacity and workspace operations.
+    remediation: >-
+      Enable the Fabric tenant settings permitting service principals to call Fabric public APIs and
+      create workspaces, scoped to a security group containing the deployment identity.
+    severity: blocking
+
+  - assertionId: naming.resource-group-not-in-use
+    designArea: resource-organization
+    description: >-
+      The resource group name this deployment intends to create does not already exist in conflicting state.
+    remediation: >-
+      Choose a different resource group name, or confirm the existing resource group is intentionally reused and empty.
+    severity: blocking
+
+  - assertionId: network.vnet-address-space-available
+    designArea: network-topology-and-connectivity
+    description: >-
+      The address space requested for the sandbox virtual network does not overlap any existing VNet.
+    remediation: >-
+      Choose a non-overlapping address range, or reuse and peer an existing network instead.
+    severity: blocking
+
+  - assertionId: security.no-blanket-deny-assignment
+    designArea: security
+    description: >-
+      No Azure Blueprint or deny assignment blocks the stage-scoped role assignments the deployment needs.
+    remediation: >-
+      Review deny assignments in scope and exempt the Groundwork deployment identity, or remove the blocking assignment.
+    severity: blocking
+
+  - assertionId: quota.resource-provider-registered
+    designArea: management
+    description: >-
+      Every resource provider the sandbox blueprint needs is registered in the target subscription.
+    remediation: >-
+      Register the missing resource provider or providers before retrying the deployment.
+    severity: blocking
+
+  - assertionId: policy.no-denying-resource-type-policy
+    designArea: governance
+    description: >-
+      No Azure Policy assignment in scope has a Deny effect against a resource type the sandbox blueprint creates.
+    remediation: >-
+      Review policy assignments in scope and exempt the target resource group, or adjust the blocking policy.
+    severity: blocking
+
+  - assertionId: devops.organization-reachable
+    designArea: platform-automation-and-devops
+    description: >-
+      The target Azure DevOps organization is reachable using the deployment identity's Entra token.
+    remediation: >-
+      Confirm the Azure DevOps organization exists, is connected to the same Entra tenant, and that
+      the Groundwork deployment identity has been added as an organization user.
+    severity: blocking

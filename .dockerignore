@@ -1,0 +1,45 @@
+# The docker build context for both services is the repo root (azure.yaml: context: ../..) —
+# without this file, `azd deploy`'s ACR Tasks remote build tars up the *entire* repository on
+# every build, including .venv (196MB+ once agent-framework-core and azure-storage-blob were
+# added), .git, and every tool cache. That silently worked until the context grew enough to trip
+# a real remote-build failure: `archive/tar: write too long`. Neither Dockerfile needs any of this
+# — both COPY only src/, pyproject.toml, uv.lock, and infra/blueprints/ explicitly.
+
+.git/
+.azure/
+.claude/
+.deepeval/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment and secrets — never sent to a remote build context
+*.env
+.env
+.env.*
+!.env.example
+
+# Editor/OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docs and specs the build never reads
+docs/
+specs/
+blogidea.md
+README.md

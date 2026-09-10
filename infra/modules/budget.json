@@ -1,0 +1,90 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "7737344541373661380"
+    }
+  },
+  "parameters": {
+    "budgetName": {
+      "type": "string",
+      "defaultValue": "groundwork-monthly",
+      "metadata": {
+        "description": "Display name for the budget."
+      }
+    },
+    "amount": {
+      "type": "int",
+      "defaultValue": 200,
+      "metadata": {
+        "description": "Monthly amount in the billing currency."
+      }
+    },
+    "contactEmail": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Operator e-mail that receives threshold notifications. Empty string disables the budget entirely."
+      }
+    },
+    "startDate": {
+      "type": "string",
+      "defaultValue": "2026-09-01",
+      "metadata": {
+        "description": "Budget period start (first day of a month). Defaults are updated at activation time; budgets roll monthly thereafter."
+      }
+    }
+  },
+  "variables": {
+    "thresholds": [
+      {
+        "threshold": 80,
+        "operator": "GreaterThan"
+      },
+      {
+        "threshold": 100,
+        "operator": "GreaterThanOrEqualTo"
+      }
+    ]
+  },
+  "resources": [
+    {
+      "condition": "[not(empty(parameters('contactEmail')))]",
+      "type": "Microsoft.Consumption/budgets",
+      "apiVersion": "2019-10-01",
+      "name": "[parameters('budgetName')]",
+      "properties": {
+        "copy": [
+          {
+            "name": "notifications",
+            "count": "[length(variables('thresholds'))]",
+            "input": {
+              "enabled": true,
+              "operator": "[variables('thresholds')[copyIndex('notifications')].operator]",
+              "threshold": "[variables('thresholds')[copyIndex('notifications')].threshold]",
+              "contactEmails": [
+                "[parameters('contactEmail')]"
+              ],
+              "thresholdType": "Actual"
+            }
+          }
+        ],
+        "category": "Cost",
+        "amount": "[parameters('amount')]",
+        "timeGrain": "Monthly",
+        "timePeriod": {
+          "startDate": "[parameters('startDate')]"
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "budgetName": {
+      "type": "string",
+      "value": "[if(equals(parameters('contactEmail'), ''), '', parameters('budgetName'))]"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+# Continuous integration for Groundwork Platform.
+#
+# PD-004 keeps *deployment* azd-only - this pipeline never deploys anything. It exists so the
+# quality gate that today lives in operator discipline (pytest + ruff + mypy parity, see
+# AGENT_HANDOFF §8 methodology) also runs automatically on every push and PR.
+#
+# Mypy note: three packages carry a documented pre-existing error baseline (controlplane 13,
+# orchestrator 12->lower after recent fixes, shared 1). The gate policy until that debt is paid
+# down is "zero net-new vs baseline", which requires a stashed-baseline diff no CI runner can
+# reproduce cheaply - so full-repo mypy runs non-blocking here, while groundwork_contracts
+# (the ADR-0001 boundary, strict-clean by design) blocks.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.12"
+
+      - name: Sync dependencies (both service extras)
+        run: uv sync --all-extras
+
+      - name: Ruff format check
+        run: uv run ruff format --check src tests
+
+      - name: Ruff lint
+        run: uv run ruff check src tests
+
+      - name: Contracts strict mypy (blocking - deterministic-execution boundary)
+        run: uv run mypy src/groundwork_contracts
+
+      - name: Full mypy (non-blocking - pre-existing baseline tracked in the project's internal implementation notes (not included in this release))
+        run: uv run mypy src/groundwork_controlplane src/groundwork_orchestrator src/groundwork_shared
+        continue-on-error: true
+
+      - name: Test suite
+        run: uv run pytest -q

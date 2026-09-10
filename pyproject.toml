@@ -1,0 +1,241 @@
+[project]
+name = "groundwork"
+version = "0.1.0"
+description = "AI-driven autonomous data platform provisioning"
+requires-python = ">=3.12"
+
+# Dependencies are declared per concern so the deterministic-execution boundary is visible in
+# packaging, not just in code. groundwork_contracts must never gain an Azure or model dependency.
+dependencies = [
+    "azure-mgmt-msi>=7.1.0",
+    "pydantic>=2.9",
+    "pyyaml>=6.0.3",
+]
+
+[project.optional-dependencies]
+# Control plane: the only place a model may be called.
+controlplane = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "azure-identity>=1.19",
+    "azure-cosmos>=4.9",
+    "azure-keyvault-secrets>=4.9",
+    "httpx>=0.28",
+    "pyjwt[crypto]>=2.10",
+    # api/main.py uses the .aio variants of DefaultAzureCredential, CosmosClient, and SecretClient.
+    # azure-core's async transport (AioHttpTransport) imports aiohttp directly rather than using
+    # httpx above; without it every async Azure client fails at construction, not just at first
+    # call. Found via a live pod crash — ImportError: aiohttp package is not installed — not by any
+    # offline check, since nothing in the test suite constructs a real async credential.
+    "aiohttp>=3.10",
+    # validation/checks/*.py (T036-T042): readiness assertions call the target tenant's ARM APIs
+    # directly, read-only. Also declared under `orchestrator` for T077's infrastructure stage,
+    # which needs resource-group and provider operations against the same subscription.
+    "azure-mgmt-resource>=23.2",
+    "azure-mgmt-subscription>=3.1",
+    # Policy was split out of azure-mgmt-resource into its own distribution at some point after
+    # this project's earlier research assumed otherwise — verified live 2026-07-31 that
+    # azure.mgmt.resource.policy is not importable from azure-mgmt-resource 26.0.0 alone.
+    "azure-mgmt-resource-policy>=1.0.0b3",
+    "azure-mgmt-network>=28.1",
+    "azure-mgmt-authorization>=4.0",
+    # T045: the planning agent. PD-002/PD-003 named the native Microsoft Agent Framework against
+    # a Foundry-hosted agent — never a direct OpenAI/Azure OpenAI SDK call, and never Copilot
+    # Studio. `groundwork_controlplane.agents.providers.foundry_openai` builds a real
+    # `agent_framework_foundry.FoundryChatClient` as of 2026-09-06 — see ADR-0013 for the RBAC
+    # root cause that blocked it from 2026-08-02 until then (an account-scope role grant this
+    # tenant needed and never had, not a platform limitation as first suspected).
+    #
+    # Deliberately NOT the `agent-framework` meta-package: it depends on `agent-framework-core[all]`,
+    # which pulls in every provider integration this framework ships — Redis, Qdrant, SQLAlchemy,
+    # Bedrock, Anthropic, Copilot Studio, pythonnet, and more — none of which this service uses.
+    # `agent-framework-foundry` is genuinely its own standalone PyPI distribution (verified live
+    # 2026-07-31 against the package's own declared dependencies), so depending on the base
+    # `agent-framework-core` plus this one provider package keeps the install and image surface
+    # smaller than the meta-package would, even though neither is on the hot path right now.
+    "agent-framework-core>=1.8",
+    "agent-framework-foundry>=1.8",
+    # T067: approval evidence is written to the immutable `approvals` blob container
+    # infra/modules/storage.bicep already provisions, from the control plane (approvals are
+    # recorded here, not by the orchestrator).
+    "azure-storage-blob>=12.24",
+    # T096: groundwork_shared/notify/dispatcher.py's real sender, imported lazily so it is never
+    # required unless a caller actually constructs one (no real caller does yet — see that
+    # module's own "disclosed, not built" section). Declared in both extras groups deliberately —
+    # this project has repeatedly shipped a container missing a dependency declared under only one
+    # of `controlplane`/`orchestrator` (see "What real deployment feedback caught" #11 and the
+    # httpx/azure-mgmt-network gaps recorded in the project's internal implementation notes (not included in this release)).
+    # T103: ACS Call Automation SDK — see matching comment under `orchestrator` below.
+    "azure-communication-callautomation>=1.3",
+    "azure-cognitiveservices-speech>=1.51.1",
+]
+# Orchestrator: deterministic execution. Deliberately has NO agent or model library.
+orchestrator = [
+    "azure-identity>=1.19",
+    # Readiness checks relocated to groundwork_shared.validation (drift-watch MVP) run inside
+    # the orchestrator image too - checks/tenant.py needs the subscription client.
+    "azure-mgmt-subscription>=3.1",
+    "azure-cosmos>=4.9",
+    "azure-mgmt-resource>=23.2",
+    "azure-storage-blob>=12.24",
+    # worker.py serves /health/live and /health/ready for the k8s probes
+    # docker/orchestrator.Dockerfile's CMD depends on (FR-042) — same server framework as the
+    # control plane, not a second one, since there is nothing orchestrator-specific about serving
+    # two HTTP health routes.
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    # worker.py uses the .aio variants of DefaultAzureCredential and CosmosClient, same as the
+    # control plane — azure-core's async transport imports aiohttp directly rather than using
+    # httpx; without it every async Azure client fails at construction (found live during T017).
+    "aiohttp>=3.10",
+    # Found missing here 2026-08-01, not by a live deploy attempt like the rest of this group's own
+    # entries — by inspecting uv.lock directly while adding azure-mgmt-fabric below. Every raw-REST
+    # execution stage (devops_project.py, infrastructure.py, identity.py, networking.py) imports
+    # httpx directly; it was declared only under `controlplane`, so `docker/orchestrator.Dockerfile`
+    # (which syncs `--extra orchestrator` alone) would have built a container missing it entirely —
+    # masked in this dev environment only because `controlplane` extras are also installed here.
+    "httpx>=0.28",
+    # networking.py (T079): the async SDK for reading private endpoint connection state. Same gap
+    # as httpx above — declared only under `controlplane` (T034-T042's own readiness checks), never
+    # added here when T079 started using it from the orchestrator side.
+    "azure-mgmt-network>=28.1",
+    # fabric.py (T081): Microsoft.Fabric/capacities ARM management — a real, GA (1.0.0, not
+    # preview) SDK, confirmed live 2026-08-01. Workspaces and managed private endpoints have no ARM
+    # equivalent at all (Fabric's own REST API, api.fabric.microsoft.com); fabric.py calls that
+    # surface directly with the httpx dependency above, matching every other raw-REST stage.
+    "azure-mgmt-fabric>=1.0.0",
+    # preflight.py (T075): execution-time policy re-check duplicates the plan-time readiness check's
+    # logic (same assertion, same PolicyClient, run again before the infrastructure stage), per the
+    # deterministic-execution duplication pattern already used for deployment_resource_group_name.
+    "azure-mgmt-resource-policy>=1.0.0b3",
+    # T096: see the matching entry and comment under `controlplane` above.
+    "azure-communication-email>=1.0",
+    # T103: ACS Call Automation SDK — handles inbound PSTN calls, answers, bidirectionally streams
+    # audio to the Voice Live WebSocket bridge. Declared in both extras groups — voice telephony is
+    # called from groundwork_channels which may be imported by either service at call-answer time,
+    # and this project has repeatedly shipped a container missing a dependency declared under only
+    # one extras group (see "What real deployment feedback caught" #11 and the httpx/azure-mgmt-network
+    # gaps recorded in the project's internal implementation notes (not included in this release)).
+    "azure-communication-callautomation>=1.3",
+]
+telemetry = [
+    "opentelemetry-api>=1.29",
+    "opentelemetry-sdk>=1.29",
+    "azure-monitor-opentelemetry>=1.6",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "src/groundwork_contracts",
+    "src/groundwork_controlplane",
+    "src/groundwork_orchestrator",
+    "src/groundwork_channels",
+    "src/groundwork_shared",
+]
+
+# ---------------------------------------------------------------------------
+# Lint and format
+# ---------------------------------------------------------------------------
+[tool.ruff]
+# Deliberate deviation from the 88 recommended in
+# the team's internal Python coding standards, documented rather than silent.
+#
+# `ruff format` still normalises *code* to its own width; this setting only governs the E501 lint.
+# The explanatory docstrings in groundwork_contracts carry the reasoning behind the
+# deterministic-execution boundary, and reflowing that prose to 88 fragments sentences mid-clause
+# for no readability gain.
+# 100 keeps the check meaningful (it still catches genuinely runaway lines) without penalising the
+# comments that make the constraints understandable.
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+# Recommended baseline (E, F, I, UP, B, C4, SIM, RUF) plus S/ASYNC/RET/TID/W:
+# S because this service holds tenant credentials, TID to enforce the deterministic-execution
+# import boundary at lint time as well as by test.
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "B",         # bugbear
+    "C4",        # comprehensions
+    "UP",        # pyupgrade
+    "ASYNC",     # async correctness
+    "S",         # bandit security
+    "RET",       # return simplification
+    "SIM",       # simplification
+    "TID",       # tidy imports
+    "RUF",       # ruff-specific
+]
+# S101 (assert) is legitimate in tests; scoped per-file below rather than globally.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# The deterministic-execution boundary enforced at lint time as well as by test. The orchestrator
+# must not reach for a model client; banning the import surface makes the mistake loud.
+"openai".msg = "Model clients belong in groundwork_controlplane only (ADR-0001)."
+"anthropic".msg = "Model clients belong in groundwork_controlplane only (ADR-0001)."
+
+# ---------------------------------------------------------------------------
+# Typing
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+
+[[tool.mypy.overrides]]
+# The contracts package is the schema boundary. It gets the strictest treatment,
+# because everything downstream trusts it.
+#
+# `disallow_any_explicit` is deliberately NOT enabled. It fights Pydantic: validator decorators and
+# `model_validate` legitimately involve `Any` at the framework seam, and enabling it produced 36
+# findings that were all framework noise rather than real type holes. `strict = true` already gives
+# the guarantees that matter here — no untyped defs, no implicit Optional, no untyped calls.
+module = "groundwork_contracts.*"
+strict = true
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "--strict-markers -ra"
+markers = [
+    "benchmark: local-only benchmark smoke tests excluded from the default suite.",
+    "contract: schema and API contract tests. Must fail closed on malformed input.",
+    "integration: requires real Azure access. Never point at a customer subscription.",
+    "idempotence: re-runs a stage against converged state and asserts no-op.",
+    "resilience: injects eviction, drain, zone loss, and state-store failure.",
+    "security: injection, isolation, entitlement, and secret-leak tests.",
+    "accessibility: WCAG 2.2 AA conformance of authored content.",
+    "requires_azure: skipped unless real Azure credentials and a test subscription are present.",
+    "architecture: dependency-manifest and layering-boundary checks; no live Azure access.",
+]
+
+[dependency-groups]
+dev = [
+    "types-pyyaml>=6.0.12.20260724",
+]

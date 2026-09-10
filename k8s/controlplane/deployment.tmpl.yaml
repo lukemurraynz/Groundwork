@@ -1,0 +1,256 @@
+# Groundwork control plane.
+#
+# Scheduled onto the `controlplane` node pool, separate from the executor pool. FR-045c requires
+# that one tenant's deployment load cannot delay another tenant's planning requests, and sharing a
+# node pool would let a burst of executor work evict or starve the planning surface.
+#
+# The service account is annotated for AKS workload identity (FR-044). No secret is mounted, no
+# connection string is present, and none is needed — every Azure client authenticates with the
+# federated credential bound to this service account.
+#
+# .tmpl.yaml, not .yaml: azd only performs Go-template Env-variable substitution on manifests with
+# this suffix (verified 2026-07-31 against Azure/azure-dev's own test fixture,
+# cli/azd/test/testdata/k8s/apply/templates/deployment.tmpl.yaml). A plain .yaml file is applied
+# byte-for-byte — every dollar-brace placeholder below would land in the cluster as a literal,
+# unresolved string.
+#
+# Note for future edits: this comment itself must not contain literal double-curly-brace syntax —
+# azd's template engine parses the whole file, comments included, so writing the real token here
+# breaks parsing (bad character U+002A '*', discovered the hard way).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controlplane
+  namespace: groundwork
+  annotations:
+    # Populated by azd from the AZURE_CONTROLPLANE_CLIENT_ID output.
+    azure.workload.identity/client-id: {{.Env.GROUNDWORK_CONTROLPLANE_CLIENT_ID}}
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controlplane
+  namespace: groundwork
+  labels:
+    app: controlplane
+    groundwork.io/tier: controlplane
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: controlplane
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never drop below the current replica count during a rollout. FR-043 requires surviving a
+      # rolling upgrade without failing in-flight work.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: controlplane
+        groundwork.io/tier: controlplane
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: controlplane
+      nodeSelector:
+        groundwork.io/tier: controlplane
+      # Spread across zones so a single zone loss cannot take out the planning surface (FR-041a).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: controlplane
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controlplane
+          image: {{.Env.SERVICE_CONTROLPLANE_IMAGE_NAME}}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: AZURE_ENV_NAME
+              value: {{.Env.AZURE_ENV_NAME}}
+            - name: AZURE_LOCATION
+              value: {{.Env.AZURE_LOCATION}}
+            - name: GROUNDWORK_COSMOS_ENDPOINT
+              value: {{.Env.GROUNDWORK_COSMOS_ENDPOINT}}
+            - name: GROUNDWORK_STORAGE_ACCOUNT_URL
+              value: {{.Env.GROUNDWORK_STORAGE_ACCOUNT_URL}}
+            - name: GROUNDWORK_KEY_VAULT_URI
+              value: {{.Env.GROUNDWORK_KEY_VAULT_URI}}
+            - name: GROUNDWORK_STORAGE_REGION
+              value: {{.Env.GROUNDWORK_STORAGE_REGION}}
+            - name: GROUNDWORK_APPROVAL_THRESHOLD_AUD
+              value: "{{.Env.GROUNDWORK_APPROVAL_THRESHOLD_AUD}}"
+            - name: GROUNDWORK_APPROVER_ROLE
+              value: {{.Env.GROUNDWORK_APPROVER_ROLE}}
+            - name: GROUNDWORK_TENANT_CONCURRENCY_CAP
+              value: "{{.Env.GROUNDWORK_TENANT_CONCURRENCY_CAP}}"
+            # Optional: defaults on in settings.py when unset or empty (ADR-0011). Override per
+            # environment with `azd env set GROUNDWORK_REQUIRE_STEP_UP_APPROVAL false`.
+            - name: GROUNDWORK_REQUIRE_STEP_UP_APPROVAL
+              value: "{{.Env.GROUNDWORK_REQUIRE_STEP_UP_APPROVAL}}"
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              value: {{.Env.APPLICATIONINSIGHTS_CONNECTION_STRING}}
+            # Set by scripts/postprovision.ps1 / .sh — the multi-tenant Entra application customers
+            # consent to and that api/auth.py validates inbound bearer tokens against (FR-005, FR-006).
+            - name: GROUNDWORK_ENTRA_APP_CLIENT_ID
+              value: {{.Env.GROUNDWORK_ENTRA_APP_CLIENT_ID}}
+            - name: GROUNDWORK_ENTRA_APP_AUDIENCE
+              value: {{.Env.GROUNDWORK_ENTRA_APP_AUDIENCE}}
+            # Optional: the registered redirect_uri the admin-consent endpoint requires
+            # (api/tenants.py). When absent, onboarding consent-url generation returns 503 —
+            # same "built but not configured" pattern as GROUNDWORK_VOICE_LIVE_ENDPOINT below.
+            - name: GROUNDWORK_ENTRA_APP_REDIRECT_URI
+              value: {{.Env.GROUNDWORK_ENTRA_APP_REDIRECT_URI}}
+            - name: AZURE_TENANT_ID
+              value: {{.Env.AZURE_TENANT_ID}}
+            # T045: the Foundry project the planning agent runs against. No API key — the
+            # control-plane workload identity authenticates via its Foundry Agent Consumer
+            # role assignment (infra/modules/foundry.bicep).
+            - name: GROUNDWORK_FOUNDRY_PROJECT_ENDPOINT
+              value: {{.Env.GROUNDWORK_FOUNDRY_PROJECT_ENDPOINT}}
+            - name: GROUNDWORK_FOUNDRY_MODEL_DEPLOYMENT
+              value: {{.Env.GROUNDWORK_FOUNDRY_MODEL_DEPLOYMENT}}
+            # T036-T042 readiness checks (validation/engine.py): the object id of the identity
+            # that will execute a deployment, so identity.py can confirm it holds no standing
+            # Owner role before execution begins.
+            - name: GROUNDWORK_ORCHESTRATOR_PRINCIPAL_ID
+              value: {{.Env.GROUNDWORK_ORCHESTRATOR_PRINCIPAL_ID}}
+            # Optional: grant_customer_ado_org_access calls Azure DevOps as this identity, not the
+            # orchestrator's — a new customer's ADO org has never heard of it either. Absent means
+            # onboarding instructions can only cover the orchestrator identity, which is not
+            # enough on its own (found live 2026-09-07).
+            - name: GROUNDWORK_CONTROLPLANE_PRINCIPAL_ID
+              value: {{.Env.GROUNDWORK_CONTROLPLANE_PRINCIPAL_ID}}
+            # Optional: the orchestrator identity's ADO-facing display name, used to build a
+            # correctly resolvable Project Collection Administrators instruction (found live
+            # 2026-09-07: the object id alone doesn't resolve well in ADO's people-picker).
+            - name: GROUNDWORK_ORCHESTRATOR_DISPLAY_NAME
+              value: {{.Env.GROUNDWORK_ORCHESTRATOR_DISPLAY_NAME}}
+            # Optional: Voice Live endpoint for the voice channel (Phase 6). When absent,
+            # voice endpoints return 503 — voice is built but not configured, not broken.
+            - name: GROUNDWORK_VOICE_LIVE_ENDPOINT
+              value: {{.Env.GROUNDWORK_VOICE_LIVE_ENDPOINT}}
+            # ACS Email (optional): tenant invites + deployment notifications. When absent,
+            # email-sending routes return 503 - same "built but not configured" pattern.
+            - name: GROUNDWORK_ACS_EMAIL_ENDPOINT
+              value: {{.Env.GROUNDWORK_ACS_EMAIL_ENDPOINT}}
+            - name: GROUNDWORK_ACS_EMAIL_SENDER_ADDRESS
+              value: {{.Env.GROUNDWORK_ACS_EMAIL_SENDER_ADDRESS}}
+          # Readiness reflects real dependency health (FR-042); a pod that cannot reach its
+          # dependencies is removed from the Service rather than serving failing requests.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # Liveness does not consult dependencies. Restarting will not fix a Cosmos outage, and
+          # cycling every pod during one would add a thundering herd to an existing incident.
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            # Root filesystem is read-only, so anything needing scratch space gets an explicit
+            # emptyDir. Nothing here writes to its own image.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: controlplane
+  namespace: groundwork
+spec:
+  type: ClusterIP
+  selector:
+    app: controlplane
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# External HTTPS entrypoint via the AKS application routing add-on (aks.bicep's
+# ingressProfile.webAppRouting). GROUNDWORK_INGRESS_HOST is populated by postprovision.ps1 once
+# the add-on's own load-balancer IP is known — empty until then, in which case this Ingress is
+# skipped entirely rather than applied with an invalid host (the same "absent means not yet
+# configured" pattern GROUNDWORK_VOICE_LIVE_ENDPOINT already uses).
+{{if .Env.GROUNDWORK_INGRESS_HOST}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: controlplane
+  namespace: groundwork
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: webapprouting.kubernetes.azure.com
+  tls:
+    - hosts:
+        - {{.Env.GROUNDWORK_INGRESS_HOST}}
+      secretName: controlplane-tls
+  rules:
+    - host: {{.Env.GROUNDWORK_INGRESS_HOST}}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: controlplane
+                port:
+                  name: http
+{{end}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: controlplane
+  namespace: groundwork
+spec:
+  # Keeps the planning surface available during a voluntary node drain, which is what FR-043 and
+  # SC-016 require of a rolling upgrade.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: controlplane

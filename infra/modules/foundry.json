@@ -1,0 +1,247 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.43.8.12551",
+      "templateHash": "15156158637258161545"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure region."
+      }
+    },
+    "resourceToken": {
+      "type": "string",
+      "metadata": {
+        "description": "Deterministic suffix."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "metadata": {
+        "description": "Tags applied to every resource."
+      }
+    },
+    "controlPlanePrincipalId": {
+      "type": "string",
+      "metadata": {
+        "description": "Principal ID of the control-plane workload identity, the only caller of this agent."
+      }
+    },
+    "operatorPrincipalId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Principal ID of the human operator running azd, for local plan-generation verification during development. Empty skips the grant."
+      }
+    },
+    "modelCapacity": {
+      "type": "int",
+      "defaultValue": 10,
+      "minValue": 1,
+      "metadata": {
+        "description": "GPT-4o GlobalStandard capacity, in units of 1,000 tokens/minute."
+      }
+    }
+  },
+  "variables": {
+    "accountName": "[format('foundry-gw-{0}', parameters('resourceToken'))]",
+    "projectName": "groundwork-planning",
+    "modelDeploymentName": "gpt-5-1",
+    "foundryAgentConsumerRoleId": "eed3b665-ab3a-47b6-8f48-c9382fb1dad6",
+    "cognitiveServicesOpenAIUserId": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd",
+    "cognitiveServicesUserId": "a97b65f3-24c7-4388-baec-2e87135dc908",
+    "foundryUserRoleId": "53ca6127-db72-4b80-b1b0-d745d6d5456d"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.CognitiveServices/accounts",
+      "apiVersion": "2025-12-01",
+      "name": "[variables('accountName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "kind": "AIServices",
+      "sku": {
+        "name": "S0"
+      },
+      "properties": {
+        "allowProjectManagement": true,
+        "customSubDomainName": "[variables('accountName')]",
+        "disableLocalAuth": true,
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.CognitiveServices/accounts/projects",
+      "apiVersion": "2025-12-01",
+      "name": "[format('{0}/{1}', variables('accountName'), variables('projectName'))]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {},
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.CognitiveServices/accounts/deployments",
+      "apiVersion": "2025-12-01",
+      "name": "[format('{0}/{1}', variables('accountName'), variables('modelDeploymentName'))]",
+      "sku": {
+        "name": "GlobalStandard",
+        "capacity": "[parameters('modelCapacity')]"
+      },
+      "properties": {
+        "model": {
+          "format": "OpenAI",
+          "name": "gpt-5.1",
+          "version": "2025-11-13"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('controlPlanePrincipalId'), variables('foundryAgentConsumerRoleId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('foundryAgentConsumerRoleId'))]",
+        "principalId": "[parameters('controlPlanePrincipalId')]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('controlPlanePrincipalId'), variables('cognitiveServicesOpenAIUserId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesOpenAIUserId'))]",
+        "principalId": "[parameters('controlPlanePrincipalId')]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    },
+    {
+      "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('operatorPrincipalId'), variables('foundryAgentConsumerRoleId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('foundryAgentConsumerRoleId'))]",
+        "principalId": "[parameters('operatorPrincipalId')]",
+        "principalType": "User"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    },
+    {
+      "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('operatorPrincipalId'), variables('cognitiveServicesOpenAIUserId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesOpenAIUserId'))]",
+        "principalId": "[parameters('operatorPrincipalId')]",
+        "principalType": "User"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('controlPlanePrincipalId'), variables('cognitiveServicesUserId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesUserId'))]",
+        "principalId": "[parameters('controlPlanePrincipalId')]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('controlPlanePrincipalId'), variables('foundryUserRoleId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('foundryUserRoleId'))]",
+        "principalId": "[parameters('controlPlanePrincipalId')]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    },
+    {
+      "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('operatorPrincipalId'), variables('cognitiveServicesUserId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesUserId'))]",
+        "principalId": "[parameters('operatorPrincipalId')]",
+        "principalType": "User"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    },
+    {
+      "condition": "[not(empty(parameters('operatorPrincipalId')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]",
+      "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), parameters('operatorPrincipalId'), variables('foundryUserRoleId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('foundryUserRoleId'))]",
+        "principalId": "[parameters('operatorPrincipalId')]",
+        "principalType": "User"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.CognitiveServices/accounts', variables('accountName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "accountName": {
+      "type": "string",
+      "value": "[variables('accountName')]"
+    },
+    "projectName": {
+      "type": "string",
+      "value": "[variables('projectName')]"
+    },
+    "modelDeploymentName": {
+      "type": "string",
+      "value": "[variables('modelDeploymentName')]"
+    },
+    "projectEndpoint": {
+      "type": "string",
+      "value": "[format('https://{0}.services.ai.azure.com/api/projects/{1}', reference(resourceId('Microsoft.CognitiveServices/accounts', variables('accountName')), '2025-12-01').customSubDomainName, variables('projectName'))]"
+    }
+  }
+}

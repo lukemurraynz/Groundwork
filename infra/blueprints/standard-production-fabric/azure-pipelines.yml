@@ -1,0 +1,248 @@
+# Groundwork platform release pipeline.
+#
+# Pushed as part of this blueprint's own platform source (groundwork_orchestrator.stages.
+# devops_project, T076) into every customer's own Azure DevOps project, as the first commit to
+# that project's default repository. Deploys this same directory's main.json (compiled ahead of
+# time from main.bicep — see infrastructure.py's own docstring for why: the Deployment Stacks REST
+# API accepts ARM JSON, not raw Bicep) through the same Azure Deployment Stack pattern the
+# Groundwork orchestrator's own infrastructure stage uses (az stack sub create — Core CLI, GA), so
+# a customer running this pipeline themselves gets results directly comparable to the
+# orchestrator's own executed stage.
+#
+# Authenticates using the "Workload identity federation" Azure Resource Manager service connection
+# groundwork_orchestrator.stages.devops_pipelines creates (see that module's docstring for a
+# currently unresolved sequencing question about exactly when in the deployment that happens). By
+# this platform's own deterministic naming convention
+# (groundwork_orchestrator.stages.identity.service_connection_name reuses devops_project.py's own
+# deployment_project_name unchanged), that connection's name is always identical to the Azure
+# DevOps project it lives in — $(System.TeamProject), a predefined pipeline variable, used below
+# rather than a hand-typed name that could drift from the real connection.
+#
+# resourceToken must match the value the Groundwork orchestrator itself computed for this
+# subscription (groundwork_orchestrator.stages.infrastructure.resource_token) — a deterministic
+# twelve-character hex digest of the subscription id, not a secret, but must be supplied correctly
+# for this pipeline to converge on the same resource names the orchestrator's own run already used,
+# rather than creating a second, differently-named set of resources.
+
+trigger: none
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+  - name: applyChanges
+    displayName: Apply changes (unchecked runs validate-only; no changes are made)
+    type: boolean
+    default: false
+  - name: location
+    displayName: Azure region
+    type: string
+    default: australiaeast
+  - name: resourceGroupName
+    displayName: Target resource group name
+    type: string
+  - name: resourceToken
+    displayName: Deterministic resource-name token for this subscription
+    type: string
+  # Fabric provisioning (T081, decision 2026-08-25): capacity + workspace + managed private
+  # endpoint run inside THIS pipeline rather than as direct calls from Groundwork's own
+  # services. Only meaningful when applyChanges is true.
+  - name: provisionFabric
+    displayName: Provision Fabric capacity, workspace, and managed private endpoint
+    type: boolean
+    default: false
+  - name: fabricCapacitySku
+    displayName: Fabric capacity SKU
+    type: string
+    default: F2
+  - name: capacityAdminUpn
+    displayName: UPN of the Fabric capacity administrator (must be a user in this tenant)
+    type: string
+  - name: validationPrincipalObjectId
+    displayName: Object id granted workspace Admin so post-deploy validation can read it
+    type: string
+    default: ''
+
+variables:
+  # Must equal stages.infrastructure.deployment_stack_name(subscription_id) — downstream
+  # verification stages (validation_tests) resolve the stack by this exact name.
+  stackName: stack-groundwork-${{ parameters.resourceToken }}
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Validate deployment stack (no changes made)'
+    condition: eq('${{ parameters.applyChanges }}', 'False')
+    inputs:
+      azureSubscription: $(System.TeamProject)
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: '$(System.DefaultWorkingDirectory)'
+      inlineScript: |
+        set -euo pipefail
+        cat > stack.parameters.json <<JSON
+        {
+          "location": {"value": "${{ parameters.location }}"},
+          "resourceGroupName": {"value": "${{ parameters.resourceGroupName }}"},
+          "resourceToken": {"value": "${{ parameters.resourceToken }}"},
+          "tags": {"value": {"managed-by": "groundwork"}}
+        }
+        JSON
+        # Deny-settings note (found live 2026-08-25): --deny-settings-mode requires
+        # Microsoft.Resources/deploymentStacks/manageDenySetting/action — not included in
+        # Contributor, and Groundwork's bootstrap cannot grant more than Contributor by design.
+        # Omitted so the pipeline runs on the platform's actual permission surface.
+        # --deny-settings-mode is REQUIRED for sub-level stacks; "none" avoids
+        # deploymentStacks/manageDenySetting/action (not in Contributor; Groundwork's bootstrap
+        # cannot grant more than Contributor by design — found live 2026-08-25).
+        az stack sub validate \
+          --name "$(stackName)" \
+          --location "${{ parameters.location }}" \
+          --template-file main.json \
+          --parameters stack.parameters.json \
+          --deny-settings-mode none \
+          --action-on-unmanage detachAll
+
+  - task: AzureCLI@2
+    displayName: 'Apply deployment stack'
+    condition: eq('${{ parameters.applyChanges }}', 'True')
+    inputs:
+      azureSubscription: $(System.TeamProject)
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: '$(System.DefaultWorkingDirectory)'
+      inlineScript: |
+        set -euo pipefail
+        cat > stack.parameters.json <<JSON
+        {
+          "location": {"value": "${{ parameters.location }}"},
+          "resourceGroupName": {"value": "${{ parameters.resourceGroupName }}"},
+          "resourceToken": {"value": "${{ parameters.resourceToken }}"},
+          "tags": {"value": {"managed-by": "groundwork"}}
+        }
+        JSON
+        # See the validate step's note: "none" keeps us inside Contributor's surface.
+        az stack sub create \
+          --name "$(stackName)" \
+          --location "${{ parameters.location }}" \
+          --template-file main.json \
+          --parameters stack.parameters.json \
+          --deny-settings-mode none \
+          --action-on-unmanage detachAll \
+          --yes
+        STACK_OUTPUTS=$(az stack sub show --name "$(stackName)" --query properties.outputs -o json | tr -d '\n')
+        echo "GROUNDWORK_STACK_OUTPUTS=$STACK_OUTPUTS"
+
+  # Fabric (T081, decision 2026-08-25): capacity via idempotent ARM PUT, then workspace and its
+  # Key Vault managed private endpoint via the Fabric REST API — all as this same federated
+  # service-connection identity, inside the customer's own pipeline. Requires the tenant's
+  # "Service principals can use Fabric APIs" Fabric admin setting to be enabled; the curl calls
+  # fail loudly if it is not.
+  - task: AzureCLI@2
+    displayName: 'Provision Fabric capacity, workspace, and managed private endpoint'
+    condition: and(eq('${{ parameters.applyChanges }}', 'True'), eq('${{ parameters.provisionFabric }}', 'True'))
+    inputs:
+      azureSubscription: $(System.TeamProject)
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+        # Fabric capacity names are lowercase-alphanumeric ONLY — hyphens are rejected
+        # ("Invalid chars in resource name", found live 2026-08-25).
+        CAPACITY="fabricgw${{ parameters.resourceToken }}"
+        WORKSPACE="ws-groundwork-${{ parameters.resourceToken }}"
+        SPN_OBJECT_ID=$(az resource show --resource-group "${{ parameters.resourceGroupName }}" --name "uami-gw-${{ parameters.resourceToken }}" --resource-type "Microsoft.ManagedIdentity/userAssignedIdentities" --query properties.principalId -o tsv)
+        # Fallback: derive from the service connection principal via ARM when the CLI trick fails.
+        KV_RESOURCE_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/${{ parameters.resourceGroupName }}/providers/Microsoft.KeyVault/vaults/kv-gw-${{ parameters.resourceToken }}"
+
+        echo "Ensuring Fabric capacity '$CAPACITY' (${{ parameters.fabricCapacitySku }})…"
+        az rest --method PUT \
+          --url "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/${{ parameters.resourceGroupName }}/providers/Microsoft.Fabric/capacities/$CAPACITY?api-version=2023-11-01" \
+          --body "{\"location\":\"${{ parameters.location }}\",\"sku\":{\"name\":\"${{ parameters.fabricCapacitySku }}\",\"tier\":\"Fabric\"},\"properties\":{\"administration\":{\"members\":[\"${{ parameters.capacityAdminUpn }}\"]}}}" > /dev/null
+        for _ in $(seq 1 40); do
+          STATE=$(az rest --method GET --url "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/${{ parameters.resourceGroupName }}/providers/Microsoft.Fabric/capacities/$CAPACITY?api-version=2023-11-01" --query properties.provisioningState -o tsv)
+          [ "$STATE" = "Succeeded" ] && break
+          echo "capacity provisioningState=$STATE; waiting…"
+          sleep 15
+        done
+        [ "$STATE" = "Succeeded" ] || { echo "capacity did not reach Succeeded (last: $STATE)"; exit 1; }
+
+        FTOK=$(az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv)
+        FABRIC="https://api.fabric.microsoft.com/v1"
+        AUTH="Authorization: Bearer $FTOK"
+        # Diagnose-with-body wrapper: -sf hides which Fabric prerequisite failed.
+        fabric_get() {
+          local resp code
+          resp=$(curl -s -w '\n%{http_code}' -H "$AUTH" "$1")
+          code=$(printf '%s' "$resp" | tail -n1)
+          if [ "$code" != "200" ]; then
+            echo "Fabric API GET $1 -> HTTP $code:"
+            printf '%s\n' "$resp" | sed '$d'
+            exit 1
+          fi
+          printf '%s\n' "$resp" | sed '$d'
+        }
+
+        # The public list only shows capacities the caller is associated with; a freshly
+        # ARM-created capacity has no SPN association yet. Fall back to the read-only admin
+        # list (our SPN group covers "Service principals can access read-only admin APIs").
+        # Instrumented resolution: print code + body head for BOTH endpoints so failures are
+        # self-explanatory in the task log.
+        PUB=$(curl -s -w '\n%{http_code}' -H "$AUTH" "$FABRIC/capacities")
+        echo "[diag] /capacities code=$(printf '%s' "$PUB" | tail -n1) bodyhead=$(printf '%s' "$PUB" | sed '$d' | head -c 160)"
+        CAPACITY_ID=$(printf '%s' "$PUB" | sed '$d' | jq -r --arg n "$CAPACITY" '.value[] | select(.displayName == $n) | .id' 2>/dev/null || true)
+        if [ -z "$CAPACITY_ID" ]; then
+          # Public list is associated-only. Two ways in:
+          #  a) Associate this pipeline's SPN with the capacity (ARM administration.members)
+          #     so future public lists include it.
+          #  b) The read-only ADMIN capacities list lives on the Power BI host with the Power BI
+          #     token audience — NOT on api.fabric.microsoft.com.
+          ASSOC=$(az rest --method PUT \
+            --url "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/${{ parameters.resourceGroupName }}/providers/Microsoft.Fabric/capacities/$CAPACITY?api-version=2023-11-01" \
+            --body "{\"location\":\"${{ parameters.location }}\",\"sku\":{\"name\":\"${{ parameters.fabricCapacitySku }}\",\"tier\":\"Fabric\"},\"properties\":{\"administration\":{\"members\":[\"${{ parameters.capacityAdminUpn }}\",\"$SPN_OBJECT_ID\"]}}}" \
+            --query properties.provisioningState -o tsv 2>&1) || true
+          echo "[diag] capacity members update -> $ASSOC"
+          sleep 10
+          PUB_ID=$(curl -s -H "$AUTH" "$FABRIC/capacities" | jq -r --arg n "$CAPACITY" '.value[] | select(.displayName == $n) | .id' 2>/dev/null || true)
+        fi
+        if [ -z "$CAPACITY_ID" ]; then
+          PBTOK=$(az account get-access-token --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv)
+          ADM=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $PBTOK" "https://api.powerbi.com/v1.0/myorg/admin/capacities")
+          ADM_CODE=$(printf '%s' "$ADM" | tail -n1)
+          echo "[diag] pbi /admin/capacities code=$ADM_CODE bodyhead=$(printf '%s' "$ADM" | sed '$d' | head -c 200)"
+          if [ "$ADM_CODE" = "200" ]; then
+            CAPACITY_ID=$(printf '%s' "$ADM" | sed '$d' | jq -r --arg n "$CAPACITY" '.value[] | select(.displayName == $n) | .id')
+          fi
+        fi
+        [ -n "$CAPACITY_ID" ] || { echo "capacity '$CAPACITY' not resolvable via public or admin list"; exit 1; }
+        echo "capacity id resolved: $CAPACITY_ID"
+
+        WORKSPACE_ID=$(fabric_get "$FABRIC/workspaces" | jq -r --arg n "$WORKSPACE" '.value[] | select(.displayName == $n) | .id')
+        if [ -z "$WORKSPACE_ID" ]; then
+          WORKSPACE_ID=$(curl -sf -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d "{\"displayName\":\"$WORKSPACE\",\"capacityId\":\"$CAPACITY_ID\"}" \
+            "$FABRIC/workspaces" | jq -r '.id')
+          echo "workspace created: $WORKSPACE_ID"
+        else
+          echo "workspace already present: $WORKSPACE_ID"
+        fi
+
+        # Grant the verifying principal workspace Admin so post-deploy validation (running as a
+        # different Groundwork identity) can see the workspace — /v1/* lists are association-
+        # scoped. 409 = already assigned, treated as converged.
+        if [ -n "${{ parameters.validationPrincipalObjectId }}" ]; then
+          RA=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d "{\"principal\":{\"id\":\"${{ parameters.validationPrincipalObjectId }}\",\"type\":\"ServicePrincipal\"},\"role\":\"Admin\"}" \
+            "$FABRIC/workspaces/$WORKSPACE_ID/roleAssignments")
+          echo "[diag] workspace roleAssignments -> HTTP $RA"
+        fi
+
+        PE_PRESENT=$(curl -sf -H "$AUTH" "$FABRIC/workspaces/$WORKSPACE_ID/managedPrivateEndpoints" | jq -r --arg t "$KV_RESOURCE_ID" '.value[] | select(.targetPrivateLinkResourceId == $t) | .id')
+        if [ -z "$PE_PRESENT" ]; then
+          curl -sf -X POST -H "$AUTH" -H "Content-Type: application/json" \
+            -d "{\"name\":\"pe-groundwork-${{ parameters.resourceToken }}\",\"targetPrivateLinkResourceId\":\"$KV_RESOURCE_ID\",\"targetSubresourceType\":\"vault\"}" \
+            "$FABRIC/workspaces/$WORKSPACE_ID/managedPrivateEndpoints" > /dev/null
+          echo "managed private endpoint created"
+        else
+          echo "managed private endpoint already present"
+        fi

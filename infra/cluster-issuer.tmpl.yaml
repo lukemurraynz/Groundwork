@@ -1,0 +1,20 @@
+# Let's Encrypt ClusterIssuer, HTTP-01 challenge — used because no groundwork.* domain is owned
+# (CLAUDE.md), so App Routing's own DNS-zone-based managed-certificate path isn't available. HTTP-01
+# needs only a resolvable hostname pointing at the ingress IP (the nip.io host postprovision.ps1
+# computes), not domain ownership or a delegated zone. Applied by postprovision.ps1 after the App
+# Routing add-on's ingress controller exists, via a plain string -replace (no envsubst dependency
+# on Windows).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: __CONTACT_EMAIL__
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: webapprouting.kubernetes.azure.com

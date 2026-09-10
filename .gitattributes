@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts must stay LF even on Windows checkouts - CRLF breaks bash
+# inside dev containers ("$'\r': command not found").
+*.sh text eol=lf

@@ -1,0 +1,124 @@
+# Readiness assertions for the Standard Production Fabric blueprint (T034, FR-014, FR-014a).
+#
+# Grouped by the eight Azure Landing Zone design areas (research notes § V-002). CAF publishes no
+# pass/fail conformance API for these — the taxonomy is borrowed for familiarity, the assertions
+# below are Groundwork's own, and every one of them must be machine-checkable against the real
+# target tenant. A check with no way to run for real does not belong here.
+#
+# Every design area in groundwork_contracts.blueprint.DesignAreaName must appear at least once, or
+# LandingZoneContract refuses to load (see readiness.py's _every_design_area_covered validator) —
+# a contract that silently skips an area would give false assurance rather than an honest gap.
+#
+# assertionId is the join key to the check function registered in
+# src/groundwork_controlplane/validation/engine.py's checks dict; every id here must have a
+# corresponding entry there or the engine refuses to start (fail closed, not a silent no-op check).
+
+contractVersion: 1.0.0
+
+assertions:
+  # --- azure-billing-and-tenant ---------------------------------------------------
+  - assertionId: tenant.subscription-reachable
+    designArea: azure-billing-and-tenant
+    description: >-
+      The target subscription is reachable and its billing state permits new resource creation.
+    remediation: >-
+      Confirm the subscription ID is correct and that its billing state is Enabled, not Disabled,
+      Warned, PastDue, or Deleted. A subscription that is not Enabled cannot accept new resources.
+    severity: blocking
+
+  # --- identity-and-access-management ---------------------------------------------
+  - assertionId: identity.deployment-identity-not-owner
+    designArea: identity-and-access-management
+    description: >-
+      The Groundwork deployment identity does not already hold the Owner role at subscription
+      scope in the target subscription.
+    remediation: >-
+      Remove any standing Owner role assignment for the Groundwork deployment identity. FR-009
+      requires least-privilege, stage-scoped role assignments granted during execution, not a
+      standing broad grant that existed before the deployment began.
+    severity: advisory
+
+  - assertionId: fabric.service-principal-api-enabled
+    designArea: identity-and-access-management
+    description: >-
+      The Groundwork deployment identity can authenticate to the Fabric public API. Service
+      principals and managed identities are rejected by every Fabric API unless the tenant
+      setting "Service principals can call Fabric public APIs" is enabled and permits this
+      identity; without it the fabric stage would halt mid-deployment.
+    remediation: >-
+      In the Fabric admin portal (Tenant settings > Developer settings), enable "Service
+      principals can call Fabric public APIs" AND "Service principals can create workspaces,
+      connections, and deployment pipelines", scoped to the entire organization or to a security
+      group containing the Groundwork deployment identity.
+    severity: blocking
+
+  # --- security ---------------------------------------------------------------------
+  - assertionId: security.no-blanket-deny-assignment
+    designArea: security
+    description: >-
+      No Azure Blueprints or Deny-assignment blocks role assignment at subscription scope, which
+      would prevent the identity stage from granting the blueprint's declared permissions.
+    remediation: >-
+      Review deny assignments in the target subscription (az role assignment list
+      --include-inherited --query "[?type=='Microsoft.Authorization/denyAssignments']") and
+      exclude the Groundwork deployment identity, or remove the blocking assignment.
+    severity: blocking
+
+  # --- resource-organization ---------------------------------------------------------
+  - assertionId: naming.resource-group-not-in-use
+    designArea: resource-organization
+    description: >-
+      The resource group name this deployment intends to create does not already exist, which
+      would otherwise mean deploying into shared or unexpected existing state.
+    remediation: >-
+      Choose a different resource group name, or confirm the existing resource group is intended
+      to be reused and empty of conflicting resources before proceeding.
+    severity: blocking
+
+  # --- network-topology-and-connectivity ---------------------------------------------
+  - assertionId: network.vnet-address-space-available
+    designArea: network-topology-and-connectivity
+    description: >-
+      The address space requested for the platform VNet does not overlap any existing VNet in the
+      target resource group's region.
+    remediation: >-
+      Choose a non-overlapping address range, or peer with the existing VNet instead of creating a
+      new one — overlapping ranges cannot be peered or routed correctly.
+    severity: blocking
+
+  # --- management ----------------------------------------------------------------------
+  - assertionId: quota.resource-provider-registered
+    designArea: management
+    description: >-
+      Every resource provider the blueprint's IaC artefacts require (Microsoft.Network,
+      Microsoft.KeyVault, Microsoft.OperationalInsights, Microsoft.Insights,
+      Microsoft.ManagedIdentity, Microsoft.Fabric) is registered in the target subscription.
+    remediation: >-
+      Register the missing resource provider(s): az provider register --namespace <name>.
+      Registration is asynchronous and can take several minutes before resources of that type can
+      be created.
+    severity: blocking
+
+  # --- governance ----------------------------------------------------------------------
+  - assertionId: policy.no-denying-resource-type-policy
+    designArea: governance
+    description: >-
+      No Azure Policy assignment at subscription or resource-group scope has a Deny effect against
+      any resource type the blueprint's IaC artefacts create.
+    remediation: >-
+      Review policy assignments in scope (az policy assignment list) and exempt the target
+      resource group, or adjust the policy, before the deployment can create the resources it
+      requires.
+    severity: blocking
+
+  # --- platform-automation-and-devops ---------------------------------------------------
+  - assertionId: devops.organization-reachable
+    designArea: platform-automation-and-devops
+    description: >-
+      The target Azure DevOps organization is reachable using the deployment identity's Entra
+      token, confirming the devops_project stage can create the project and import the repository.
+    remediation: >-
+      Confirm the Azure DevOps organization exists, is connected to the same Entra tenant as the
+      target subscription, and that the Groundwork deployment identity has been added as an
+      organization user.
+    severity: blocking

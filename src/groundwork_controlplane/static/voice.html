@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Groundwork Voice</title>
+<style>
+:root {--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#7c6ff7;--success:#3fb950;--error:#f85149;--warning:#d29922;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color-scheme:dark}
+*,*::before,*::after{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center}
+main{width:100%;max-width:560px;padding:2rem 1.25rem}
+h1{font-size:1.35rem;font-weight:600;margin-bottom:.35rem}
+h1 span{color:var(--accent)}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:2rem;margin-bottom:1rem}
+.call-status{display:flex;flex-direction:column;align-items:center;gap:1rem;margin-bottom:1.5rem}
+.call-dot{width:64px;height:64px;border-radius:50%;background:var(--muted);display:flex;align-items:center;justify-content:center;transition:all .3s;cursor:pointer}
+.call-dot svg{width:28px;height:28px;fill:var(--text)}
+.call-dot.idle:hover{background:var(--accent);transform:scale(1.05)}
+.call-dot.listening{background:var(--error);animation:pulse 1.2s ease-in-out infinite;box-shadow:0 0 24px rgba(248,81,73,.3)}
+.call-dot.thinking{background:var(--warning);animation:pulse .8s ease-in-out infinite}
+.call-dot.speaking{background:var(--accent);animation:pulse .6s ease-in-out infinite;box-shadow:0 0 24px rgba(124,111,247,.3)}
+.call-dot.done{background:var(--success);box-shadow:0 0 24px rgba(63,185,80,.3)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.call-label{font-size:.95rem;font-weight:500;text-align:center}
+.conversation{max-height:24rem;overflow-y:auto;margin-bottom:1rem}
+.msg{margin-bottom:.75rem;padding:.65rem 1rem;border-radius:10px;font-size:.9rem;line-height:1.5;max-width:90%}
+.msg.user{background:var(--accent);color:#fff;margin-left:auto;border-bottom-right-radius:4px}
+.msg.agent{background:var(--surface);border:1px solid var(--border);margin-right:auto;border-bottom-left-radius:4px;color:var(--text)}
+.msg.plan{background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.2);margin-right:auto;border-bottom-left-radius:4px;white-space:pre-wrap;font-family:"SF Mono",monospace;font-size:.8rem}
+.hint{text-align:center;color:var(--muted);font-size:.8rem;margin-top:1rem}
+@media(max-width:480px){main{padding:1rem .5rem}}
+@media(prefers-reduced-motion:reduce){.call-dot.listening,.call-dot.thinking,.call-dot.speaking{animation:none}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Groundwork <span>Voice</span></h1>
+  <div class="panel">
+    <div id="signedOut" style="text-align:center">
+      <p style="color:var(--muted);margin-bottom:1rem;font-size:.9rem">Sign in with your Microsoft account to use Groundwork voice. Every action below runs as an authenticated call; nothing works without a signed-in token.</p>
+      <p id="authError" style="display:none;color:#ff8a80;margin:0 0 1rem;font-size:.85rem;max-width:32rem"></p>
+      <button id="signInBtn" onclick="signIn()" disabled style="padding:.6rem 1.25rem;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.9rem">Loading…</button>
+    </div>
+    <div id="signedIn" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;font-size:.8rem;color:var(--muted)">
+        <span id="whoami"></span>
+        <a href="#" onclick="signOut();return false" style="color:var(--muted)">Sign out</a>
+      </div>
+      <div class="call-status">
+        <div class="call-dot idle" id="callDot" onclick="toggleCall()" title="Answer / Hang up">&#9742;</div>
+        <span class="call-label" id="callLabel">Tap to answer</span>
+      </div>
+      <div class="conversation" id="conversation" aria-live="polite"></div>
+      <p class="hint" id="hint">Tap to answer, then speak.</p>
+      <div style="display:flex;gap:0.5rem;margin-top:0.5rem">
+        <input id="textInput" type="text" placeholder="Or type here..." style="flex:1;padding:0.5rem;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.9rem">
+        <button onclick="sendText()" style="padding:0.5rem 1rem;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.85rem">Send</button>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+// Real Entra sign-in (MSAL.js, authorization-code-with-PKCE) — added 2026-08-06 alongside the
+// fix that made every /v1/voice/* mutating route require a validated token. Every fetch below
+// goes through authFetch(), which attaches a real bearer token acquired for this signed-in user;
+// there is no other identity path here, and no endpoint call is made before sign-in completes.
+//
+// msal-browser is vendored locally (/static/msal-browser.min.js), not loaded from Microsoft's
+// CDN at runtime: the previously pinned CDN URL (alcdn.msauth.net/browser/3.18.0/...) 404s —
+// that version was pruned from the CDN — which threw inside `new msal.PublicClientApplication`
+// and surfaced everywhere else as the misleading "Cannot access 'msalApp' before initialization"
+// TDZ error. A vendored copy also removes a third-party script-supply-chain dependency from a
+// page that handles auth tokens.
+//
+// Loaded via an explicitly awaited <script> injection rather than a static <script src> tag:
+// a plain tag *should* block until executed per the HTML spec, but do not lean on that — await
+// the load event directly so `msal` is guaranteed defined before it's ever referenced, in every
+// browser and embedding context.
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('failed to load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+// The client ID/scope are fetched from the backend rather than hardcoded: a value baked into
+// this file is wrong the instant it's served from a different environment (a different Entra
+// app per azd environment) than the one it was authored against — exactly what caused the first
+// version of this bug in a live environment.
+let msalApp = null;
+let account = null;
+
+async function initAuth() {
+  // No longer clearing sessionStorage's "interaction in progress" flag here (an earlier popup-era
+  // fix): with loginRedirect, that exact flag is how handleRedirectPromise() below knows a
+  // redirect is actually in progress and there's a hash on this exact page load to process.
+  // Clearing it first — found live — made handleRedirectPromise() silently return with no
+  // account even though a real, valid auth code was sitting right there in the URL.
+  await loadScript('/static/msal-browser.min.js');
+  const config = await (await fetch('/v1/voice/auth-config')).json();
+  msalApp = new msal.PublicClientApplication({
+    auth: {
+      clientId: config.clientId,
+      authority: 'https://login.microsoftonline.com/common',
+      // Full-page redirect, not a popup: loginPopup hit interaction_in_progress,
+      // block_nested_popups, and finally a popup that completed a real auth exchange (a valid
+      // code in its URL, confirmed live) but never signalled back to the opener window at all —
+      // four distinct cross-window-messaging failure modes in a row across two browsers.
+      // loginRedirect sidesteps the entire popup/opener relationship: the whole page navigates
+      // to Entra and back, and handleRedirectPromise() below (already required either way)
+      // picks up the result on return. No popup blocker, no window-monitoring, no window to lose
+      // track of.
+      redirectUri: window.location.origin + window.location.pathname,
+    },
+    cache: { cacheLocation: 'sessionStorage' },
+  });
+  window.API_SCOPE = config.scope;
+  await msalApp.initialize();
+  // Guard: a failed redirect redemption (e.g. AADSTS9002326 platform mismatch, or a replayed
+  // consumed code left in the URL) used to throw out of initAuth and leave the page on its
+  // initial "loading" state forever. Recover instead: strip the dead hash, clear MSAL's
+  // interaction-in-progress marker, surface the reason, and let the user retry Sign in.
+  try {
+    const result = await msalApp.handleRedirectPromise();
+    if (result && result.account) account = result.account;
+    else {
+      const existing = msalApp.getAllAccounts();
+      if (existing.length) account = existing[0];
+    }
+  } catch (authError) {
+    console.error('Sign-in redirect failed:', authError);
+    if (window.location.hash && window.location.hash.includes('code=')) {
+      history.replaceState(null, '', window.location.origin + window.location.pathname);
+    }
+    for (let i = sessionStorage.length - 1; i >= 0; i--) {
+      const key = sessionStorage.key(i);
+      if (key && (key.startsWith('msal.') || key.includes('interaction'))) sessionStorage.removeItem(key);
+    }
+    const errEl = document.getElementById('authError');
+    if (errEl) {
+      errEl.textContent = 'Sign-in failed: ' + (authError.errorMessage || authError.message || 'unknown error') +
+        ' — clear site data if this persists, then try Sign in again.';
+      errEl.style.display = 'block';
+    }
+  }
+  updateAuthUI();
+}
+
+function updateAuthUI() {
+  document.getElementById('signedOut').style.display = account ? 'none' : 'block';
+  document.getElementById('signedIn').style.display = account ? 'block' : 'none';
+  if (account) document.getElementById('whoami').textContent = 'Signed in as ' + (account.username || account.name);
+  // Only enabled once msalApp is actually constructed, so a click can never race initAuth().
+  const btn = document.getElementById('signInBtn');
+  btn.disabled = false;
+  btn.textContent = 'Sign in';
+}
+
+async function signIn() {
+  if (!msalApp) {
+    alert('Still loading — please wait a moment and try again.');
+    return;
+  }
+  // loginRedirect() navigates this page away; it does not return a signed-in result here — that
+  // happens on the next page load via handleRedirectPromise() in initAuth().
+  await msalApp.loginRedirect({ scopes: [window.API_SCOPE] });
+}
+
+function signOut() {
+  if (account) msalApp.logoutRedirect({ account: account });
+}
+
+async function getAccessToken() {
+  if (!account) throw new Error('not signed in');
+  try {
+    const result = await msalApp.acquireTokenSilent({ scopes: [window.API_SCOPE], account: account });
+    return result.accessToken;
+  } catch (e) {
+    // Found live: falling back to acquireTokenRedirect() here — a full-page navigation — was
+    // wrong. This function is also called mid-voice-session (getAccessToken() feeds the
+    // WebSocket's auth frame); a silent-refresh hiccup mid-call was tearing down the entire page
+    // out from under a live microphone/WebSocket connection, which looked exactly like "Voice
+    // session ended" with no server-side error, because nothing server-side failed — the client
+    // just vanished mid-connection. A background token refresh must never navigate the page away
+    // destructively; that's only appropriate for the explicit, user-initiated Sign in action.
+    // Surface the failure instead and let the caller decide (answer() shows it and hangs up
+    // cleanly; the user can press Sign in again if a real re-auth is needed).
+    throw new Error('token refresh failed: ' + e.message);
+  }
+}
+
+async function authFetch(url, opts) {
+  opts = opts || {};
+  const token = await getAccessToken();
+  opts.headers = Object.assign({}, opts.headers, { Authorization: 'Bearer ' + token });
+  return fetch(url, opts);
+}
+
+const authReady = initAuth();
+
+// Real-time duplex Voice Live client (2026-08-21 scope decision): microphone audio streams to
+// /ws/voice as PCM16 24 kHz frames; the agent's synthesized speech streams back over the same
+// socket and is played immediately, so the customer can talk over it (barge-in). The first
+// frame must be the auth frame — browsers cannot set headers on a WebSocket handshake.
+let ws = null, sid = '', active = false;
+let playCtx = null, nextStartTime = 0;
+let activeSources = [];
+let micStream = null, audioCtx = null, workletNode = null;
+
+function uuid() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    var r = Math.random()*16|0, v = c=='x'?r:(r&0x3|0x8);
+    return v.toString(16);
+  });
+}
+
+function toggleCall() { active ? hangUp() : answer(); }
+
+async function answer() {
+  active = true; sid = uuid();
+  document.getElementById('conversation').innerHTML = '';
+  setState('listening');
+  document.getElementById('hint').textContent = 'Connecting...';
+  try {
+    await startVoiceSession();
+    document.getElementById('hint').textContent = 'Speak when ready.';
+  } catch (e) {
+    addMsg('agent', 'Could not start voice: ' + e.message);
+    hangUp();
+  }
+}
+
+async function startVoiceSession() {
+  // Microphone → 24 kHz mono PCM16 worklet → WebSocket binary frames.
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+  });
+  audioCtx = new AudioContext({ sampleRate: 24000 });
+  await audioCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([
+    'class P extends AudioWorkletProcessor {' +
+    '  process(inputs) {' +
+    '    const ch = inputs[0][0];' +
+    '    if (ch) {' +
+    '      const pcm = new Int16Array(ch.length);' +
+    '      for (var i = 0; i < ch.length; i++) {' +
+    '        var s = Math.max(-1, Math.min(1, ch[i]));' +
+    '        pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;' +
+    '      }' +
+    '      this.port.postMessage(pcm.buffer, [pcm.buffer]);' +
+    '    }' +
+    '    return true;' +
+    '  }' +
+    '}' +
+    'registerProcessor("pcm-capture", P);'
+  ], { type: 'application/javascript' })));
+  workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture');
+  workletNode.port.onmessage = function(e) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data);
+  };
+  audioCtx.createMediaStreamSource(micStream).connect(workletNode);
+  // Playback stays in the same 24 kHz context; nothing connects to destination except played audio.
+  playCtx = audioCtx;
+  nextStartTime = 0;
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/v1/voice/ws/voice/' + sid);
+  ws.binaryType = 'arraybuffer';
+
+  const token = await getAccessToken();
+  await new Promise(function(resolve, reject) {
+    ws.onopen = function() {
+      ws.send(JSON.stringify({ type: 'auth', token: token }));
+      resolve();
+    };
+    ws.onerror = function() { reject(new Error('websocket failed')); };
+  });
+  ws.onmessage = onServerMessage;
+  ws.onclose = function() { if (active) { addMsg('agent', 'Voice session ended.'); hangUp(); } };
+}
+
+function onServerMessage(msg) {
+  if (msg.data instanceof ArrayBuffer) { playPcm(msg.data); return; }
+  var d;
+  try { d = JSON.parse(msg.data); } catch (e) { return; }
+  switch (d.type) {
+    case 'ready':
+      setState('listening');
+      break;
+    case 'transcript':
+      addMsg(d.role === 'customer' ? 'user' : 'agent', d.text);
+      if (d.role === 'agent') setState('speaking'); else setState('listening');
+      if (d.role === 'customer') maybeVoiceApprove(d.text);
+      break;
+    case 'speech_started':
+      flushPlayback(); // barge-in: stop playing the interrupted sentence immediately
+      break;
+    case 'plan':
+      showPlan(d.plan);
+      break;
+    case 'error':
+      addMsg('agent', 'Error: ' + d.message);
+      break;
+  }
+}
+
+function playPcm(pcmBuffer) {
+  var pcm = new Int16Array(pcmBuffer);
+  var floats = new Float32Array(pcm.length);
+  for (var i = 0; i < pcm.length; i++) floats[i] = pcm[i] / 32768;
+  var buf = playCtx.createBuffer(1, floats.length, playCtx.sampleRate);
+  buf.copyToChannel(floats, 0);
+  var src = playCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(playCtx.destination);
+  // Chain seamlessly after whatever is already playing.
+  nextStartTime = Math.max(nextStartTime, playCtx.currentTime);
+  src.start(nextStartTime);
+  nextStartTime += buf.duration;
+  activeSources.push(src);
+  src.onended = function() {
+    activeSources = activeSources.filter(function(s) { return s !== src; });
+  };
+}
+
+function flushPlayback() {
+  activeSources.forEach(function(s) { try { s.stop(); } catch (e) {} });
+  activeSources = [];
+  nextStartTime = playCtx ? playCtx.currentTime : 0;
+}
+
+function hangUp() {
+  active = false;
+  if (workletNode) { workletNode.disconnect(); workletNode = null; }
+  if (micStream) { micStream.getTracks().forEach(function(t) { t.stop(); }); micStream = null; }
+  flushPlayback();
+  if (audioCtx) { audioCtx.close(); audioCtx = null; playCtx = null; }
+  if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+  setState('idle');
+  document.getElementById('callLabel').textContent = 'Call ended';
+  setTimeout(function(){ document.getElementById('callLabel').textContent = 'Tap to answer'; }, 2000);
+}
+
+function addMsg(role, text) {
+  var c = document.getElementById('conversation');
+  var d = document.createElement('div');
+  d.className = 'msg ' + role;
+  d.textContent = text;
+  c.appendChild(d);
+  c.scrollTop = c.scrollHeight;
+}
+
+function setState(s) {
+  var dot = document.getElementById('callDot');
+  dot.className = 'call-dot ' + s;
+  document.getElementById('callLabel').textContent = {idle:'Tap to answer',listening:'Listening',thinking:'Thinking',speaking:'Speaking',done:'Plan ready'}[s]||s;
+}
+
+// Voice-triggered approval state. Global (not closures inside showPlan) so the customer's own
+// transcribed speech, handled in a separate top-level function, can see and act on it. Per
+// ADR-0011, the customer's own voice may authorise the deployment directly - but the
+// realtime model itself is deliberately given no tool to do that (approval must never be
+// something an LLM decides). This is the resolution: the CLIENT recognises the customer's own
+// literal words from the real transcript event and calls the identical real approval path a
+// button click would - the model never decides or acts on the customer's behalf.
+var pendingPlan = null;
+var pendingNeedsLicenceAck = false;
+var pendingAckChecked = false;
+var pendingApproved = false;
+
+function showPlan(plan) {
+  setState('done');
+  var cost = plan.costEstimate || {};
+  addMsg('plan','Plan sealed: ' + plan.blueprintId + ', ' + plan.region + ', ' + plan.fabricCapacitySku
+    + '\nEstimated cost: ' + cost.monthlyTotal + ' ' + cost.currency + '/month'
+    + '\nplanHash: ' + plan.planHash);
+  var c = document.getElementById('conversation');
+  pendingPlan = plan;
+  pendingApproved = false;
+  // FR-013d: below F64 every Power BI viewer needs Pro/PPU. Show the disclosure and gate
+  // approval - button or voice - behind an explicit acknowledgement; the flag rides to
+  // /v1/voice/approve.
+  pendingNeedsLicenceAck = !!plan.licensingDisclosure;
+  pendingAckChecked = !pendingNeedsLicenceAck;
+  if (pendingNeedsLicenceAck) {
+    var box = document.createElement('label');
+    box.style.cssText = 'display:block;margin:.5rem 0;font-size:.8rem;line-height:1.35';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.style.marginRight = '.4rem';
+    var span = document.createElement('span');
+    span.textContent = plan.licensingDisclosure;
+    box.appendChild(cb); box.appendChild(span);
+    c.appendChild(box);
+    cb.onchange = function() { btn.disabled = !cb.checked; pendingAckChecked = cb.checked; };
+  }
+  var btn = document.createElement('button');
+  btn.textContent = 'Approve & Deploy';
+  btn.style.cssText = 'margin:.5rem 0;padding:.5rem 1rem;background:var(--success);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.85rem';
+  if (pendingNeedsLicenceAck) { btn.disabled = true; }
+  btn.onclick = function() { pendingApproved = true; approvePlan(plan, pendingAckChecked); };
+  c.appendChild(btn);
+  c.scrollTop = c.scrollHeight;
+  document.getElementById('hint').textContent = 'Plan ready. Say "approve" or tap Approve.';
+}
+
+// Called with every customer transcript line while a plan is showing. Deliberately simple,
+// literal phrase matching - not model interpretation - because the plan is the ONLY thing left
+// to decide once it is on screen (every field was already confirmed to get here), so even a
+// bare "yes" is unambiguous at this point in the conversation.
+function maybeVoiceApprove(text) {
+  if (!pendingPlan || pendingApproved) return;
+  var t = text.toLowerCase();
+  var saysApprove = /\b(yes|approve|approved|go ahead|deploy|confirm|proceed)\b/.test(t);
+  if (!saysApprove) return;
+  if (pendingNeedsLicenceAck && !pendingAckChecked) {
+    var acknowledges = /\b(acknowledge|licens|licenc)\b/.test(t);
+    if (!acknowledges) {
+      addMsg('agent', 'Before I can proceed by voice, please also say you acknowledge the Power BI licensing requirement, or tick the checkbox.');
+      return;
+    }
+    pendingAckChecked = true;
+  }
+  pendingApproved = true;
+  approvePlan(pendingPlan, pendingAckChecked);
+}
+
+async function approvePlan(plan, licenceAcknowledged) {
+  var cost = plan.costEstimate || {};
+  try {
+    var r = await authFetch('/v1/voice/approve', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        planHash: plan.planHash,
+        acknowledgedCostAud: cost.monthlyTotal,
+        acknowledgedPowerBiViewerLicensing: !!licenceAcknowledged,
+      }),
+    });
+    var d = await r.json();
+    if (!r.ok) { addMsg('agent', 'Approval failed: ' + (d.detail || r.status)); pendingApproved = false; return; }
+    if (d.secondApprovalRequired) {
+      addMsg('agent', 'Recorded. This plan is above the approval threshold and needs a second, distinct approver before anything is queued.');
+    } else {
+      addMsg('agent', 'Approved and queued for deployment. Deployment ID: ' + d.deploymentId);
+      pendingPlan = null; // done - a later "yes" in conversation must not re-trigger this
+    }
+  } catch(e) {
+    addMsg('agent','Approval failed: ' + e.message);
+  }
+}
+
+function sendText() {
+  var input = document.getElementById('textInput');
+  var text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  addMsg('user', text);
+  if (!active || !ws || ws.readyState !== WebSocket.OPEN) {
+    // Start a session just for typed input; audio stays optional.
+    active = true; sid = uuid();
+    startVoiceSession().then(function() {
+      ws.send(JSON.stringify({ type: 'text', text: text }));
+    }).catch(function(e) { addMsg('agent', 'Could not connect: ' + e.message); });
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'text', text: text }));
+}
+</script>
+</body>
+</html>

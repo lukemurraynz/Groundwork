@@ -1,0 +1,54 @@
+# Groundwork rollback pipeline — dev/sandbox blueprint.
+
+trigger: none
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+  - name: rollbackToOutputs
+    displayName: Prior infrastructure outputs JSON from the succeeded deployment-stack run
+    type: string
+    default: '{}'
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Redeploy last-known-good infrastructure state'
+    inputs:
+      azureSubscription: $(System.TeamProject)
+      scriptType: bash
+      scriptLocation: inlineScript
+      workingDirectory: '$(System.DefaultWorkingDirectory)'
+      inlineScript: |
+        set -euo pipefail
+        OUTPUTS_JSON='${{ parameters.rollbackToOutputs }}'
+        [ "$OUTPUTS_JSON" != '{}' ] || { echo 'rollbackToOutputs is required'; exit 1; }
+        echo "$OUTPUTS_JSON" > rollback.outputs.json
+
+        RESOURCE_GROUP_NAME=$(jq -r '.resourceGroupName.value // empty' rollback.outputs.json)
+        [ -n "$RESOURCE_GROUP_NAME" ] || { echo 'rollbackToOutputs.resourceGroupName.value is required'; exit 1; }
+
+        RESOURCE_TOKEN=$(jq -r '.managedIdentityResourceId.value // empty' rollback.outputs.json | sed -n 's#^.*/uami-gw-\([a-z0-9]\{12\}\)$#\1#p')
+        [ -n "$RESOURCE_TOKEN" ] || { echo 'could not derive resourceToken from managedIdentityResourceId'; exit 1; }
+
+        LOCATION=$(az group show --name "$RESOURCE_GROUP_NAME" --query location -o tsv)
+        [ -n "$LOCATION" ] || { echo 'could not resolve resource group location'; exit 1; }
+
+        STACK_NAME="stack-groundwork-$RESOURCE_TOKEN"
+        cat > stack.parameters.json <<JSON
+        {
+          "location": {"value": "$LOCATION"},
+          "resourceGroupName": {"value": "$RESOURCE_GROUP_NAME"},
+          "resourceToken": {"value": "$RESOURCE_TOKEN"},
+          "tags": {"value": {"managed-by": "groundwork", "environment": "non-production"}}
+        }
+        JSON
+
+        az stack sub create \
+          --name "$STACK_NAME" \
+          --location "$LOCATION" \
+          --template-file main.json \
+          --parameters stack.parameters.json \
+          --deny-settings-mode none \
+          --action-on-unmanage detachAll \
+          --yes

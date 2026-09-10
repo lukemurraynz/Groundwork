@@ -1,0 +1,185 @@
+# Standard Production Fabric platform — the single approved blueprint for Release 1 (FR-013a).
+#
+# This is a declarative artefact, not code. FR-013b requires a new blueprint to be addable without
+# changing the planning, validation, or orchestration components, so adding one must never require a
+# release of the service itself.
+#
+# Loaded and hashed at startup, then validated against groundwork_contracts.blueprint.PlatformBlueprint.
+# A malformed blueprint fails startup rather than failing a customer's deployment halfway through.
+
+blueprintId: standard-production-fabric
+version: 1.0.0
+displayName: Standard Production Fabric Platform
+
+# F2 is the minimum F SKU. Verified 2026-07-30 that managed private endpoints are supported on all
+# F SKUs (research notes V-006), so FR-036 private networking is satisfied at the floor — minimum sizing
+# does not weaken the security posture.
+#
+# The trade-off, which FR-013d requires be shown at plan time: below F64 every Power BI viewer needs
+# a Pro or PPU licence. Scaling up is an in-place capacity operation (FR-013e), not a redeploy.
+defaultFabricSku: F2
+
+iacArtefacts:
+  - module: avm/res/resources/resource-group
+    version: 0.4.0
+    source: br/public
+  - module: avm/res/network/virtual-network
+    version: 0.5.1
+    source: br/public
+  - module: avm/res/key-vault/vault
+    version: 0.9.0
+    source: br/public
+  - module: avm/res/operational-insights/workspace
+    version: 0.7.0
+    source: br/public
+  - module: avm/res/insights/component
+    version: 0.4.1
+    source: br/public
+  - module: avm/res/managed-identity/user-assigned-identity
+    version: 0.4.0
+    source: br/public
+
+# FR-009: every permission carries a justification, and the justification must explain why a
+# narrower role is insufficient. Broad roles (Owner, Contributor) require a substantive rationale —
+# the contract model enforces a length floor precisely so a shrug does not pass review.
+requiredPermissions:
+  - role: Contributor
+    scope: subscription
+    stage: infrastructure
+    justification: >-
+      Creating resource groups, virtual networks, private endpoints, and Key Vault requires write
+      access across multiple resource providers at subscription scope. Narrower built-in roles
+      cover single providers only and would require a custom role per provider, which increases
+      the permission surface rather than reducing it. Scoped to the target subscription alone.
+  - role: Reader
+    scope: subscription
+    stage: networking
+    justification: >-
+      Verification-only (see the networking stage's own idempotenceContract below): the subnet,
+      private endpoint, and private DNS zone link this stage checks are all created by the
+      infrastructure stage's single deployment stack, not by a second write here. This stage reads
+      that deployment stack (subscription-scoped, same as the infrastructure stage's own grant)
+      to find the actual private endpoint resource IDs it created, then reads each one's live
+      connection-approval state. No write permission is needed or granted.
+  - role: Managed Identity Contributor
+    scope: resourceGroup
+    stage: identity
+    justification: >-
+      Creating user-assigned identities and federated credentials for the deployed platform.
+      Deliberately not Owner: no role assignment authority is needed at this stage.
+  - role: Fabric Administrator
+    scope: capacity
+    stage: fabric
+    justification: >-
+      Provisioning Fabric capacity and creating workspaces. Scoped to the capacity created by
+      this deployment, not tenant-wide Fabric administration.
+  - role: Monitoring Contributor
+    scope: resourceGroup
+    stage: monitoring
+    justification: >-
+      Configuring diagnostic settings and alert rules on deployed resources.
+  - role: Project Administrator
+    scope: azureDevOpsProject
+    stage: devops_project
+    justification: >-
+      Creating the Azure DevOps project and importing the platform repository. Scoped to the
+      created project; no organisation-level administration is required.
+
+# Stage order is derived from dependsOn (FR-028). The contract model rejects a dependency cycle at
+# load time rather than letting a deployment deadlock inside a customer tenant.
+stages:
+  - name: devops_project
+    dependsOn: []
+    retryBudget: 3
+    idempotenceContract: >-
+      Project creation is keyed on project name within the organisation. Re-running finds the
+      existing project and repository and returns no_op without re-importing.
+    recoveryPath: >-
+      Forward-fix. A partially created project is completed on retry; the project is not deleted,
+      because deletion would discard any customer work already committed to it.
+
+  - name: infrastructure
+    dependsOn:
+      - devops_project
+    retryBudget: 3
+    idempotenceContract: >-
+      Deployed through an Azure deployment stack. Re-running against converged state produces an
+      empty what-if diff and returns no_op.
+    recoveryPath: >-
+      Halt and preserve. Rollback is available but requires its own approval under FR-031a, since
+      tearing down provisioned infrastructure is itself irreversible.
+
+  - name: networking
+    dependsOn:
+      - infrastructure
+    retryBudget: 3
+    # Verification-only, decided 2026-08-01: the subnet, private endpoints, and DNS zone link this
+    # stage's name suggests are all created by the infrastructure stage's own single deployment
+    # stack (main.bicep, T078) — there is no second network write to make here. This stage instead
+    # confirms the infrastructure stage's private endpoints actually reached an Approved connection
+    # state, which a "succeeded" deployment-stack apply does not by itself guarantee (private
+    # endpoint connection approval is its own asynchronous Azure workflow). Always returns no_op;
+    # a connection stuck non-Approved is a real, reportable failure of this stage, not a no-op.
+    idempotenceContract: >-
+      Read-only verification of infrastructure-stage-created resources. Every run re-checks live
+      state and returns no_op; there is nothing here to converge toward.
+    recoveryPath: >-
+      Retry. A non-Approved private endpoint connection or a missing expected resource means the
+      infrastructure stage's own apply has not (or not yet) fully converged — retrying this stage
+      re-checks; if the underlying resource is genuinely absent, the infrastructure stage itself
+      needs forward-fix, not this one.
+
+  - name: identity
+    dependsOn:
+      - infrastructure
+    retryBudget: 3
+    # Corrected 2026-08-01 to match this stage's actual, investigated scope (T080): the managed
+    # identity itself is already created by the infrastructure stage's own deployment stack
+    # (main.bicep, T078). This stage creates the one thing that isn't — a federated identity
+    # credential trusting the not-yet-built Azure DevOps service connection (T076a) — never a role
+    # assignment, matching requiredPermissions' own "no role assignment authority is needed" text
+    # above, which this prose previously contradicted.
+    idempotenceContract: >-
+      The federated identity credential is keyed by a deterministic name derived from the
+      subscription id. Re-running against a credential whose issuer, subject, and audience already
+      match returns no_op; a drifted or absent credential is (re)written to the same values.
+    recoveryPath: >-
+      Forward-fix. A missing or drifted federated credential is (re)created on retry.
+
+  - name: fabric
+    dependsOn:
+      - networking
+      - identity
+    retryBudget: 3
+    # 900 seconds. Verified 2026-07-30 (research notes V-006): after deleting a Fabric managed private
+    # endpoint you must wait at least 15 minutes before recreating one to the same resource.
+    # Retrying faster produces a spurious failure that looks like a defect in our code.
+    minimumRetryIntervalSeconds: 900
+    idempotenceContract: >-
+      Capacity is keyed by name and region; workspaces by name within the capacity. Re-running
+      returns no_op. Managed private endpoint creation is not retried within 15 minutes of a
+      deletion against the same target resource.
+    recoveryPath: >-
+      Halt and preserve. Fabric capacity is billable to the customer, so an automatic teardown
+      would be both irreversible and financially material. Rollback requires explicit approval.
+
+  - name: monitoring
+    dependsOn:
+      - fabric
+    retryBudget: 3
+    idempotenceContract: >-
+      Diagnostic settings and alert rules are keyed by name against each target resource.
+      Re-running returns no_op.
+    recoveryPath: >-
+      Forward-fix. Missing diagnostic settings are added on retry.
+
+  - name: validation_tests
+    dependsOn:
+      - monitoring
+    retryBudget: 2
+    idempotenceContract: >-
+      Read-only. Executes health checks and validation tests against the deployed platform and
+      writes no resources, so re-running is always safe.
+    recoveryPath: >-
+      Retry. A validation test that did not execute is reported as failed, never as passed
+      (FR-034), so a retry budget exhaustion halts the deployment rather than completing it.

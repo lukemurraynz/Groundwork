@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Protocol
@@ -67,7 +68,9 @@ from groundwork_contracts.tenant import (
 )
 from groundwork_controlplane.api.auth import AuthenticatedCaller, CallerRole
 from groundwork_controlplane.api.lighthouse_onboarding import (
+    DelegationState,
     build_azure_devops_instructions,
+    build_tenant_onboarding_facts,
 )
 from groundwork_controlplane.api.plans import get_authenticated_caller
 from groundwork_orchestrator.stages.identity import (
@@ -305,8 +308,15 @@ async def confirm_customer_consent_attestation(
     if tenant.consent_state is not ConsentState.PENDING:
         raise HTTPException(
             status_code=409,
-            detail=f"tenant consent_state is {tenant.consent_state.value!r}, not 'pending'; "
-            "this route only transitions a pending tenant to granted",
+            detail=(
+                f"tenant consent_state is {tenant.consent_state.value!r}, not 'pending'. "
+                + (
+                    "Consent was already confirmed. "
+                    "GET /v1/tenants/{tenantId}/onboarding/status to see the current state."
+                    if tenant.consent_state is ConsentState.GRANTED
+                    else "Consent was revoked. Contact the customer to re-grant."
+                )
+            ),
         )
 
     updated = tenant.model_copy(
@@ -871,6 +881,17 @@ async def confirm_consent(
 ) -> dict[str, object]:
     """Operator attestation that consent was actually granted — see module docstring for why
     this, not an automated callback, is the real verification mechanism today."""
+    caller.require_role(CallerRole.OPERATOR)
+    tenant_repository = request.app.state.tenant_repository
+    tenant = await tenant_repository.read(tenant_id, tenant_id)
+    if tenant is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"tenant {tenant_id!r} not found. "
+                "POST /v1/tenants to create the tenant record first."
+            ),
+        )
     replaced = await confirm_customer_consent_attestation(
         tenant_id=tenant_id,
         note=body.note,
@@ -893,7 +914,13 @@ async def set_voice_channel_enabled(
     tenant_repository = request.app.state.tenant_repository
     tenant = await tenant_repository.read(tenant_id, tenant_id)
     if tenant is None:
-        raise HTTPException(status_code=404, detail="tenant not found")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"tenant {tenant_id!r} not found. "
+                "POST /v1/tenants to create the tenant record first."
+            ),
+        )
     updated = tenant.model_copy(update={"voice_channel_enabled": body.enabled})
     updated = CustomerTenant.model_validate(updated.model_dump())
     replaced = await tenant_repository.replace(tenant_id, updated)
@@ -1202,3 +1229,385 @@ async def invite_admin(
         "emailOperationId": operation_id,
         "invitedBy": caller.object_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# Onboarding status — single read that tells the operator what's done and
+# what to do next, replacing the need to manually inspect each field.
+# ---------------------------------------------------------------------------
+
+
+class OnboardingStepStatus(BaseModel):
+    """One step's completion state."""
+
+    model_config = ConfigDict(frozen=True)
+
+    completed: bool
+    completed_at: str | None = None
+    detail: str = ""
+
+
+class OnboardingStatusResponse(BaseModel):
+    """The full onboarding picture for one tenant — what's done, what's next."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    tenant_id: Annotated[str, Field(alias="tenantId")]
+    consent_state: Annotated[str, Field(alias="consentState")]
+    steps: dict[str, OnboardingStepStatus]
+    next_action: Annotated[str, Field(alias="nextAction")]
+
+
+def _build_onboarding_status(tenant: CustomerTenant) -> OnboardingStatusResponse:
+    """Derive the onboarding status from the tenant record's current state."""
+    steps: dict[str, OnboardingStepStatus] = {}
+
+    # Step 1: Tenant created (always true if we're reading it)
+    steps["tenantCreated"] = OnboardingStepStatus(
+        completed=True,
+        detail="Tenant record exists.",
+    )
+
+    # Step 2: Consent confirmed
+    if tenant.consent_state is ConsentState.GRANTED:
+        steps["consentConfirmed"] = OnboardingStepStatus(
+            completed=True,
+            completed_at=(
+                tenant.consent_granted_at.isoformat() if tenant.consent_granted_at else None
+            ),
+            detail=(
+                f"Consent confirmed by {tenant.consent_confirmed_by_display_name or 'unknown'}."
+            ),
+        )
+    elif tenant.consent_state is ConsentState.REVOKED:
+        steps["consentConfirmed"] = OnboardingStepStatus(
+            completed=False,
+            detail="Consent has been revoked. Contact the customer to re-grant.",
+        )
+    else:
+        steps["consentConfirmed"] = OnboardingStepStatus(
+            completed=False,
+            detail=(
+                "Consent not yet confirmed. Send the admin-consent URL to the customer's "
+                "administrator, then confirm via POST /v1/tenants/{tenantId}/onboarding/confirm."
+            ),
+        )
+
+    # Step 3: Offshore inference consent
+    if tenant.offshore_inference_consent is not None:
+        steps["offshoreConsentRecorded"] = OnboardingStepStatus(
+            completed=True,
+            completed_at=tenant.offshore_inference_consent.consented_at.isoformat(),
+            detail="Offshore-inference consent recorded.",
+        )
+    else:
+        steps["offshoreConsentRecorded"] = OnboardingStepStatus(
+            completed=False,
+            detail=(
+                "Offshore-inference consent not recorded. "
+                "POST /v1/tenants/offshore-inference-consent to record it."
+            ),
+        )
+
+    # Step 4: Voice channel enabled
+    if tenant.voice_channel_enabled:
+        steps["voiceEnabled"] = OnboardingStepStatus(
+            completed=True,
+            detail="Voice channel enabled.",
+        )
+    else:
+        steps["voiceEnabled"] = OnboardingStepStatus(
+            completed=False,
+            detail=(
+                "Voice channel not enabled. "
+                "POST /v1/tenants/{tenantId}/voice-channel to enable it."
+            ),
+        )
+
+    # Determine next action
+    next_action = ""
+    if tenant.consent_state is ConsentState.PENDING:
+        next_action = (
+            "Confirm consent: POST /v1/tenants/{tenantId}/onboarding/confirm"
+        )
+    elif tenant.offshore_inference_consent is None:
+        next_action = (
+            "Record offshore-inference consent: POST /v1/tenants/offshore-inference-consent"
+        )
+    elif not tenant.voice_channel_enabled:
+        next_action = "Enable voice: POST /v1/tenants/{tenantId}/voice-channel"
+    else:
+        next_action = "Onboarding complete. Tenant is ready for voice and chat."
+
+    return OnboardingStatusResponse(
+        tenant_id=tenant.tenant_id,
+        consent_state=tenant.consent_state.value,
+        steps=steps,
+        next_action=next_action,
+    )
+
+
+@router.get("/{tenant_id}/onboarding/status")
+async def get_onboarding_status(
+    tenant_id: str,
+    request: Request,
+    caller: Annotated[AuthenticatedCaller, Depends(get_authenticated_caller)],
+) -> dict[str, object]:
+    """Return the onboarding status for one tenant — what's done and what's next.
+
+    Replaces the need to manually inspect consent_state, offshore_inference_consent,
+    and voice_channel_enabled. The ``nextAction`` field tells the operator exactly
+    which endpoint to call next.
+    """
+    caller.require_role(CallerRole.OPERATOR)
+    tenant_repository = request.app.state.tenant_repository
+    tenant = await tenant_repository.read(tenant_id, tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="tenant not found")
+    status = _build_onboarding_status(tenant)
+    return status.model_dump(by_alias=True)
+
+
+@router.post("/{tenant_id}/onboarding/verify-consent")
+async def verify_consent(
+    tenant_id: str,
+    request: Request,
+    caller: Annotated[AuthenticatedCaller, Depends(get_authenticated_caller)],
+) -> dict[str, object]:
+    """Run the read-only Lighthouse probe and report whether the customer's admin actually
+    completed the admin-consent flow.
+
+    This is the evidence-backed alternative to a blind consent attestation. The control plane's
+    existing read-only ARM credential checks the customer subscription's
+    ``Microsoft.ManagedServices`` registrationAssignments for Groundwork's own principal — no new
+    secret and no new authority, it just makes the operator's ``confirm`` step informed instead
+    of a guess.
+
+    If delegation is GRANTED and the tenant record is still PENDING (``consentCanBeConfirmed:
+    true``), the customer's admin has completed the flow and the operator can confirm with
+    confidence. If delegation is PENDING, the admin has not completed it yet (or Groundwork's
+    managed-by tenant is not delegated on this subscription) — re-run this check after the admin
+    approves. Requires a recorded, deployable subscription entitlement on the tenant (the same
+    single-subscription precondition as the onboarding-facts probe it reuses).
+    """
+    caller.require_role(CallerRole.OPERATOR)
+    tenant_repository = request.app.state.tenant_repository
+    tenant = await tenant_repository.read(tenant_id, tenant_id)
+    if tenant is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"tenant {tenant_id!r} not found. "
+                "POST /v1/tenants to create the tenant record first."
+            ),
+        )
+
+    facts = await build_tenant_onboarding_facts(
+        tenant=tenant,
+        settings=request.app.state.settings,
+        credential=request.app.state.credential,
+        http_client=getattr(request.app.state, "lighthouse_http_client", None),
+    )
+
+    delegation = facts.delegation_state
+    record_is_granted = tenant.consent_state is ConsentState.GRANTED
+    verified = delegation is DelegationState.GRANTED
+
+    if delegation is DelegationState.GRANTED and not record_is_granted:
+        next_action = (
+            "Delegation is live on the subscription. Confirm consent now with "
+            "POST /v1/tenants/{tenantId}/onboarding/confirm."
+        )
+    elif delegation is DelegationState.GRANTED and record_is_granted:
+        next_action = "Consent already confirmed and delegation verified. Nothing to do."
+    else:
+        next_action = (
+            "Lighthouse delegation not found yet. Ask the customer's Global Administrator to "
+            "complete the admin-consent flow, then re-run verify-consent."
+        )
+
+    return {
+        "tenantId": tenant_id,
+        "subscriptionId": facts.subscription_id,
+        "delegationState": delegation.value,
+        "consentState": tenant.consent_state.value,
+        "verified": verified,
+        "consentCanBeConfirmed": verified and not record_is_granted,
+        "lighthouseCommand": facts.lighthouse.az_deployment_command,
+        "nextAction": next_action,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Quick-onboard — single call that creates a tenant, confirms consent,
+# records offshore-inference consent, and optionally enables voice. For
+# operators onboarding their own dev tenant where the 4-call sequence is
+# unnecessary friction.
+# ---------------------------------------------------------------------------
+
+
+class QuickOnboardRequest(BaseModel):
+    """Single-call onboarding for an operator's own dev tenant.
+
+    Combines create_tenant, confirm_consent, offshore_inference_consent, and
+    voice_channel_enable into one call. The tenant's consent_state starts PENDING
+    and is immediately confirmed to GRANTED within the same call — same audit
+    trail as the multi-call sequence (consent_confirmed_by_* fields are set),
+    just without the round-trips.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    tenant_id: Annotated[str, Field(alias="tenantId", pattern=r"^[0-9a-fA-F-]{36}$")]
+    display_name: Annotated[str, Field(alias="displayName", min_length=1)]
+    approved_regions: Annotated[frozenset[str], Field(alias="approvedRegions", min_length=1)]
+    data_residency_regions: Annotated[
+        frozenset[str], Field(alias="dataResidencyRegions", min_length=1)
+    ]
+    consent_note: Annotated[str, Field(alias="consentNote", min_length=1, max_length=500)]
+    voice_enabled: Annotated[bool, Field(alias="voiceEnabled")] = False
+    voice_note: Annotated[
+        str | None, Field(alias="voiceNote", min_length=1, max_length=500)
+    ] = None
+
+
+@dataclass(frozen=True, slots=True)
+class QuickOnboardParams:
+    """Raw quick-onboard parameters — shared by the REST route and the voice tool.
+
+    The voice tool supplies these from model-extracted arguments; the REST route
+    supplies them from the Pydantic body. Keeping the two callers on the same
+    dataclass means the actual onboarding logic has exactly one implementation.
+    """
+
+    tenant_id: str
+    display_name: str
+    approved_regions: frozenset[str]
+    data_residency_regions: frozenset[str]
+    consent_note: str
+    voice_enabled: bool = False
+    voice_note: str | None = None
+
+
+async def quick_onboard_tenant(
+    *,
+    params: QuickOnboardParams,
+    request: Request | WebSocket,
+    caller: AuthenticatedCaller,
+) -> OnboardingStatusResponse:
+    """Run the single-call onboarding flow for the operator's own tenant.
+
+    Creates the tenant record, confirms consent, records offshore-inference consent,
+    and optionally enables the voice channel. Requires CallerRole.OPERATOR, and the
+    caller's token ``tid`` must match the ``tenantId`` being onboarded (this is the
+    operator's own tenant, not a customer tenant).
+
+    If any step fails, the earlier steps are not rolled back (Cosmos does not support
+    multi-document transactions). The returned status shows exactly what succeeded and
+    what remains, so the caller (REST or voice) can resume with the individual
+    endpoints. The shared function raises :class:`HTTPException`/``AuthorizationError``
+    for domain failures; each caller maps those to its own response shape.
+    """
+    caller.require_role(CallerRole.OPERATOR)
+
+    # The operator's own tenant must match the tenantId being onboarded.
+    if caller.tenant_id != params.tenant_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "quick-onboard is only available for the operator's own tenant "
+                f"(caller tid={caller.tenant_id}, requested tenantId={params.tenant_id})"
+            ),
+        )
+
+    tenant_repository = request.app.state.tenant_repository
+    now = _now(request)
+
+    # Step 1: Create tenant record
+    tenant = CustomerTenant(
+        tenant_id=params.tenant_id,
+        display_name=params.display_name,
+        consent_state=ConsentState.PENDING,
+        approved_regions=params.approved_regions,
+        data_residency_regions=params.data_residency_regions,
+        concurrency_cap=request.app.state.settings.governance.default_tenant_concurrency_cap,
+    )
+    try:
+        await tenant_repository.create(params.tenant_id, tenant)
+    except CosmosResourceExistsError:
+        # Tenant already exists — read it and continue from its current state.
+        existing = await tenant_repository.read(params.tenant_id, params.tenant_id)
+        if existing is not None:
+            tenant = existing
+
+    # Step 2: Confirm consent (flip PENDING -> GRANTED)
+    if tenant.consent_state is ConsentState.PENDING:
+        tenant = tenant.model_copy(
+            update={
+                "consent_state": ConsentState.GRANTED,
+                "consent_granted_at": now,
+                "consent_confirmed_by_object_id": caller.object_id,
+                "consent_confirmed_by_display_name": caller.display_name,
+                "consent_confirmation_note": params.consent_note,
+            }
+        )
+        tenant = CustomerTenant.model_validate(tenant.model_dump())
+        tenant = await tenant_repository.replace(params.tenant_id, tenant)
+
+    # Step 3: Record offshore-inference consent
+    if tenant.offshore_inference_consent is None:
+        consent_store: OffshoreInferenceConsentStore = request.app.state.consent_store
+        offshore_consent = await consent_store.record(
+            consent_id=str(uuid.uuid4()),
+            consenting_identity_object_id=caller.object_id,
+            consenting_identity_display_name=caller.display_name,
+            disclosure_version=CURRENT_DISCLOSURE_VERSION,
+            now=now,
+        )
+        tenant = tenant.model_copy(update={"offshore_inference_consent": offshore_consent})
+        tenant = CustomerTenant.model_validate(tenant.model_dump())
+        tenant = await tenant_repository.replace(params.tenant_id, tenant)
+
+    # Step 4: Enable voice (if requested)
+    if params.voice_enabled and not tenant.voice_channel_enabled:
+        if params.voice_note is None:
+            raise HTTPException(
+                status_code=400,
+                detail="voiceNote is required when voiceEnabled is true",
+            )
+        tenant = tenant.model_copy(update={"voice_channel_enabled": True})
+        tenant = CustomerTenant.model_validate(tenant.model_dump())
+        tenant = await tenant_repository.replace(params.tenant_id, tenant)
+
+    # Return the full onboarding status
+    return _build_onboarding_status(tenant)
+
+
+@router.post("/onboarding/quick-onboard", status_code=201)
+async def quick_onboard(
+    body: QuickOnboardRequest,
+    request: Request,
+    caller: Annotated[AuthenticatedCaller, Depends(get_authenticated_caller)],
+) -> dict[str, object]:
+    """Single-call onboarding for an operator's own dev tenant.
+
+    Creates the tenant record, confirms consent, records offshore-inference consent,
+    and optionally enables the voice channel. Requires CallerRole.OPERATOR. The
+    caller's token ``tid`` must match the ``tenantId`` being onboarded (this is the
+    operator's own tenant, not a customer tenant).
+
+    If any step fails, the earlier steps are not rolled back (Cosmos does not support
+    multi-document transactions). The response includes the onboarding status so the
+    caller can see exactly what succeeded and what remains.
+    """
+    params = QuickOnboardParams(
+        tenant_id=body.tenant_id,
+        display_name=body.display_name,
+        approved_regions=body.approved_regions,
+        data_residency_regions=body.data_residency_regions,
+        consent_note=body.consent_note,
+        voice_enabled=body.voice_enabled,
+        voice_note=body.voice_note,
+    )
+    status = await quick_onboard_tenant(params=params, request=request, caller=caller)
+    return status.model_dump(by_alias=True)

@@ -37,6 +37,12 @@ Four calls, in this order. The order isn't arbitrary: `CustomerTenant`'s own val
 `voiceChannelEnabled: true` on a tenant with no recorded consent yet, so voice-channel enablement
 has to come after consent, not before.
 
+**Faster alternative**: if you're onboarding your own dev tenant, there's a single-call shortcut
+that does all four steps at once. `POST /v1/tenants/onboarding/quick-onboard` creates the tenant,
+confirms consent, records offshore-inference consent, and (optionally) enables voice, in one
+request. It requires your token's `tid` to match the `tenantId` you're onboarding. See
+[Quick-onboard your own tenant](#quick-onboard-your-own-tenant) below for the exact request.
+
 **1. Create the tenant.** `tenantId` is your own Entra tenant ID (`az account show --query
 tenantId -o tsv`): this is the tenant the voice/chat gate will actually check against when you
 sign in.
@@ -56,6 +62,19 @@ curl -sS -X POST "$HOST/v1/tenants" \
 Entra admin center after they completed the admin-consent redirect (`GET
 /v1/tenants/{tenantId}/onboarding/consent-url` gives you that URL). For your own tenant, you *are*
 the admin: the note just needs to say something true.
+
+Before confirming, run the read-only verification probe so your attestation is evidence-backed
+rather than blind. It checks whether Groundwork's principal actually appears in the subscription's
+Lighthouse delegation — no new secret, just the control plane's existing read-only credential:
+
+```bash
+curl -sS -X POST "$HOST/v1/tenants/<your-tenant-id>/onboarding/verify-consent" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+If the response says `"consentCanBeConfirmed": true`, the customer's admin completed the
+admin-consent flow and you can confirm with confidence. If `"delegationState": "pending"`, they
+haven't finished it yet — re-run the probe after they approve.
 
 ```bash
 curl -sS -X POST "$HOST/v1/tenants/<your-tenant-id>/onboarding/confirm" \
@@ -101,3 +120,40 @@ If you get as far as actually approving a deployment plan and hit a `step-up-aut
 [ADR-0011](adr/0011-voice-alone-authorises-irreversible-actions.md)), not this onboarding sequence.
 It wants your token to show MFA or to have been issued in the last 10 minutes; sign in again or
 turn it off for local testing with `azd env set GROUNDWORK_REQUIRE_STEP_UP_APPROVAL false`.
+
+## Quick-onboard your own tenant
+
+The four-call sequence above is the honest, step-by-step path for a real customer engagement where
+each attestation is a separate decision. When you're onboarding your own dev tenant for testing and
+you *are* the admin doing every step, the round-trips add nothing. One call replaces them:
+
+```bash
+curl -sS -X POST "$HOST/v1/tenants/onboarding/quick-onboard" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "tenantId": "<your-tenant-id>",
+    "displayName": "My test engagement",
+    "approvedRegions": ["australiaeast"],
+    "dataResidencyRegions": ["australiaeast"],
+    "consentNote": "own dev tenant, self-confirmed",
+    "voiceEnabled": true,
+    "voiceNote": "voice included in this engagement"
+  }'
+```
+
+What it does in one call:
+
+1. Creates the tenant record (`consent_state` starts `PENDING`, same as the multi-call path)
+2. Confirms consent and flips it to `GRANTED`, recording your identity as the confirming operator
+   (the same audit fields the `confirm` route sets)
+3. Records offshore-inference consent against the current disclosure version
+4. Enables voice if `voiceEnabled` is true
+
+The response is the tenant's onboarding status, so you can see exactly what completed and what
+remains. Your token's `tid` must match the `tenantId` you send: this endpoint exists for the
+operator's own tenant, not for onboarding a customer tenant, which still goes through the
+four-call sequence so each attestation stays a separate, reviewable step.
+
+If you'd rather see the current state without changing anything, `GET
+/v1/tenants/<your-tenant-id>/onboarding/status` returns each step's completion state and a
+`nextAction` field telling you exactly which endpoint to call next.

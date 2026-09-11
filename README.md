@@ -21,7 +21,7 @@ operation, with sequence and architecture diagrams, before you're in the code.
 | --- | --- |
 | **Control plane** (`src/groundwork_controlplane`) | Talks to the Foundry planning agent, prices the request against the Azure Retail Prices API, and validates it against the target tenant before anyone approves it. |
 | **Orchestrator** (`src/groundwork_orchestrator`) | Executes an approved plan stage by stage (landing zone, Fabric capacity, DevOps project, pipeline) with checkpointed state, so a failure resumes rather than restarts. |
-| **Voice channel** (`src/groundwork_channels/voice`) | The same conversational agent as chat, over real-time speech (Azure AI Voice Live) instead of text, it can onboard a tenant or request/approve a deployment by talking, using the identical tool set (`create_tenant`, `generate_plan`, `approve`) as the chat and UI channels. Gated behind consent and explicit per-tenant enablement. `voice.html` is the reference client. |
+| **Voice channel** (`src/groundwork_channels/voice`) | The same conversational agent as chat, over real-time speech (Azure AI Voice Live) instead of text, it can onboard a tenant or request/approve a deployment by talking, using the same tool set as the chat surface (create tenant, quick-onboard for the operator's own tenant, confirm consent, grant ADO access, trigger bootstrap, generate plan, check plan status). Approval stays on the HTTP route, never a voice tool. Gated behind consent and explicit per-tenant enablement. `voice.html` is the reference client. |
 | **Contracts** (`src/groundwork_contracts`) | The schema every plan has to satisfy before the orchestrator will look at it. Strict-typed on purpose: this is the boundary in ADR-0001. |
 
 Both services run as separate AKS workloads with separate managed identities. The control plane can
@@ -153,7 +153,7 @@ Framework client), recorded from live deployment checks rather than the archive.
 ## Testing
 
 ```bash
-uv run pytest -q       # 922 tests: unit, contract, integration, security, resilience
+uv run pytest -q       # 939 tests: unit, contract, integration, security, resilience
 uv run ruff check src tests
 uv run mypy src/groundwork_contracts   # strict; the ADR-0001 boundary is typed, not just documented
 ```

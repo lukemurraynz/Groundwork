@@ -37,6 +37,7 @@ from groundwork_contracts.tenant import (
     ConversationChannel,
     ConversationRecord,
     CustomerTenant,
+    OffshoreInferenceConsent,
     SubscriptionEntitlement,
 )
 from groundwork_controlplane.api.auth import AuthenticatedCaller, AuthenticationError, CallerRole
@@ -655,6 +656,146 @@ def test_voice_chat_create_tenant_returns_verified_result(
     assert onboarding["evidence"]["consentState"] == "pending"
 
 
+class _FakeConsentStore:
+    """Minimal OffshoreInferenceConsentStore fake for quick_onboard's consent step."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def record(
+        self,
+        *,
+        consent_id: str,
+        consenting_identity_object_id: str,
+        consenting_identity_display_name: str,
+        disclosure_version: str,
+        now: datetime,
+    ) -> OffshoreInferenceConsent:
+        self.calls.append(
+            {
+                "consent_id": consent_id,
+                "consenting_identity_object_id": consenting_identity_object_id,
+                "consenting_identity_display_name": consenting_identity_display_name,
+                "disclosure_version": disclosure_version,
+                "now": now,
+            }
+        )
+        return OffshoreInferenceConsent(
+            consenting_identity_object_id=consenting_identity_object_id,
+            consenting_identity_display_name=consenting_identity_display_name,
+            consented_at=now,
+            artefact_uri=f"https://example.invalid/consent/{consent_id}.json",
+            disclosure_version=disclosure_version,
+        )
+
+
+def test_voice_chat_quick_onboard_onboards_own_tenant(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    """The voice model can run the whole onboarding flow in one call for the operator's own
+    tenant: PENDING consent gets confirmed and recorded, offshore consent lands, voice enables."""
+    sealed = _sealed_plan(valid_plan)
+    pending_tenant = _tenant().model_copy(
+        update={"consent_state": ConsentState.PENDING, "consent_granted_at": None}
+    )
+    app, _deployment_container, _artefacts = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=100000.0,
+        retail_prices_client=retail_prices_client,
+        tenant=pending_tenant,
+        callers={"good-token": _caller(APPROVER_ID, roles=(CallerRole.OPERATOR,))},
+    )
+    app.state.consent_store = _FakeConsentStore()
+    app.state.planning_agent = _FakeVoicePlanningAgent(
+        replies=["Your tenant is onboarded."], plan=valid_plan
+    )
+    app.state.voice_tool_client = _FakeChatClient(
+        [
+            _FakeChatResponse(
+                _FakeChatMessage(
+                    content="Your tenant is onboarded.",
+                    tool_calls=[
+                        _FakeToolCall(
+                            name="quick_onboard",
+                            arguments=(
+                                '{"display_name":"My dev tenant",'
+                                '"consent_note":"own dev tenant, self-confirmed",'
+                                '"voice_enabled":true,"voice_note":"voice included"}'
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/voice/chat",
+        headers=_auth_headers("good-token"),
+        params={"message": "Onboard my own dev tenant."},
+    )
+
+    assert response.status_code == 200, response.text
+    onboarding = response.json()["onboarding"]
+    assert onboarding["status"] == "onboarded"
+    assert onboarding["verified"] is True
+    assert onboarding["consentState"] == "granted"
+    assert onboarding["steps"] == {
+        "tenantCreated": True,
+        "consentConfirmed": True,
+        "offshoreConsentRecorded": True,
+        "voiceEnabled": True,
+    }
+
+
+def test_voice_chat_quick_onboard_denied_for_non_operator(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    """quick_onboard requires the OPERATOR role — a caller without it gets a denied result."""
+    sealed = _sealed_plan(valid_plan)
+    app, _deployment_container, _artefacts = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=100000.0,
+        retail_prices_client=retail_prices_client,
+        callers={"good-token": _caller(APPROVER_ID, roles=(CallerRole.APPROVER,))},
+    )
+    app.state.consent_store = _FakeConsentStore()
+    app.state.planning_agent = _FakeVoicePlanningAgent(
+        replies=["I cannot do that."], plan=valid_plan
+    )
+    app.state.voice_tool_client = _FakeChatClient(
+        [
+            _FakeChatResponse(
+                _FakeChatMessage(
+                    content="I cannot do that.",
+                    tool_calls=[
+                        _FakeToolCall(
+                            name="quick_onboard",
+                            arguments=(
+                                '{"display_name":"My dev tenant",'
+                                '"consent_note":"own dev tenant, self-confirmed"}'
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/voice/chat",
+        headers=_auth_headers("good-token"),
+        params={"message": "Onboard my own dev tenant."},
+    )
+
+    assert response.status_code == 200, response.text
+    onboarding = response.json()["onboarding"]
+    assert onboarding["status"] == "denied"
+    assert onboarding["verified"] is False
+
+
 def test_voice_chat_confirm_customer_consent_denied_for_non_operator(
     valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
 ) -> None:
@@ -806,6 +947,90 @@ def test_voice_chat_grant_ado_org_access_returns_member_pending_pca(
     assert onboarding["status"] == "member_pending_pca"
     assert onboarding["verified"] is False
     assert "Project Collection Administrators" in onboarding["pcaInstructionText"]
+
+
+def test_voice_chat_get_onboarding_status_includes_step_completion(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    """The real status runner returns the step-completion breakdown alongside the onboarding
+    facts, so a voice operator gets both the delegation evidence and the check-list picture."""
+    sealed = _sealed_plan(valid_plan)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "registrationAssignments" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "properties": {
+                                "registrationDefinitionId": (
+                                    "/subscriptions/33333333-3333-3333-3333-333333333333/"
+                                    "providers/Microsoft.ManagedServices/registrationDefinitions/"
+                                    "test-def"
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "properties": {
+                    "authorizations": [
+                        {
+                            "principalId": APPROVER_ID,
+                            "roleDefinitionId": "b24988ac-6180-42a0-ab88-20f7382dd24c",
+                        }
+                    ]
+                }
+            },
+        )
+
+    app, _deployment_container, _artefacts = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=100000.0,
+        retail_prices_client=retail_prices_client,
+        callers={"good-token": _caller(APPROVER_ID, roles=(CallerRole.OPERATOR,))},
+    )
+    app.state.lighthouse_http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.state.planning_agent = _FakeVoicePlanningAgent(
+        replies=["Here is the onboarding status."], plan=valid_plan
+    )
+    app.state.voice_tool_client = _FakeChatClient(
+        [
+            _FakeChatResponse(
+                _FakeChatMessage(
+                    content="Here is the onboarding status.",
+                    tool_calls=[
+                        _FakeToolCall(name="get_onboarding_status", arguments="{}")
+                    ],
+                )
+            )
+        ]
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/voice/chat",
+        headers=_auth_headers("good-token"),
+        params={"message": "What is my onboarding status?"},
+    )
+
+    assert response.status_code == 200, response.text
+    onboarding = response.json()["onboarding"]
+    # Onboarding facts (delegation evidence).
+    assert onboarding["delegationState"] == "granted"
+    # Step-completion breakdown from the shared status builder.
+    status = onboarding["onboardingStatus"]
+    assert status["consentState"] == "granted"
+    assert status["steps"]["tenantCreated"]["completed"] is True
+    assert status["steps"]["consentConfirmed"]["completed"] is True
+    assert status["steps"]["offshoreConsentRecorded"]["completed"] is False
+    assert status["steps"]["voiceEnabled"]["completed"] is False
+    assert "offshore-inference-consent" in status["nextAction"]
 
 
 def test_voice_chat_trigger_bootstrap_identity_returns_verified_result(

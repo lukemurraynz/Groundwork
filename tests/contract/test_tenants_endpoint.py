@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from groundwork_channels.voice.consent import CURRENT_DISCLOSURE_VERSION
-from groundwork_contracts.tenant import CustomerTenant, OffshoreInferenceConsent
+from groundwork_contracts.tenant import ConsentState, CustomerTenant, OffshoreInferenceConsent
 from groundwork_controlplane.api.auth import AuthenticatedCaller, AuthenticationError, CallerRole
 from groundwork_controlplane.api.errors import register_error_handlers
 from groundwork_controlplane.api.lighthouse_onboarding import router as lighthouse_onboarding_router
@@ -750,6 +750,81 @@ def test_lighthouse_onboarding_reports_granted_state() -> None:
     )
 
 
+def test_verify_consent_reports_pending_when_admin_has_not_completed_flow() -> None:
+    """The read-only Lighthouse probe finds no delegation, so the operator should NOT confirm
+    yet — a blind attestation would be premature."""
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))},
+        http_handler=_lighthouse_handler_factory(granted=False),
+        credential=_FakeArmCredential(),
+    )
+    client = TestClient(app)
+    _create_tenant_with_subscription(client)
+
+    response = client.post(
+        f"/v1/tenants/{TENANT_ID}/onboarding/verify-consent",
+        headers={"Authorization": "Bearer good-token"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["delegationState"] == "pending"
+    assert body["consentState"] == "pending"
+    assert body["verified"] is False
+    assert body["consentCanBeConfirmed"] is False
+    assert "admin-consent flow" in body["nextAction"]
+
+
+def test_verify_consent_reports_granted_and_unlocks_confirm() -> None:
+    """Delegation is live but the record is still PENDING — the operator can now confirm with
+    evidence instead of a guess."""
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))},
+        http_handler=_lighthouse_handler_factory(granted=True),
+        credential=_FakeArmCredential(),
+    )
+    client = TestClient(app)
+    _create_tenant_with_subscription(client)
+
+    response = client.post(
+        f"/v1/tenants/{TENANT_ID}/onboarding/verify-consent",
+        headers={"Authorization": "Bearer good-token"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["delegationState"] == "granted"
+    assert body["consentState"] == "pending"
+    assert body["verified"] is True
+    assert body["consentCanBeConfirmed"] is True
+    assert "onboarding/confirm" in body["nextAction"]
+    assert "az deployment sub create" in body["lighthouseCommand"]
+
+
+def test_verify_consent_requires_operator_role() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(REQUESTER_ID, roles=(CallerRole.REQUESTER,))}
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        f"/v1/tenants/{TENANT_ID}/onboarding/verify-consent",
+        headers={"Authorization": "Bearer good-token"},
+    )
+    assert response.status_code == 403
+
+
+def test_verify_consent_404_for_unknown_tenant() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        f"/v1/tenants/{TENANT_ID}/onboarding/verify-consent",
+        headers={"Authorization": "Bearer good-token"},
+    )
+    assert response.status_code == 404
+
+
 def test_grant_ado_org_access_reports_member_pending_pca() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -1212,10 +1287,10 @@ def test_add_subscription_entitlement_rejects_duplicate() -> None:
 def test_full_onboarding_and_consent_flow_enables_voice() -> None:
     """End-to-end regression for the wiring gap this session found: a tenant that goes through
     every real onboarding + consent + voice-enablement route ends up with
-    CustomerTenant.may_accept_voice_call() true — not just each individual route returning 2xx.
+    CustomerTenant.may_accept_voice_call() true - not just each individual route returning 2xx.
 
     Order matters and is itself part of what this test documents: consent has to be recorded
-    before voice_channel_enabled can be set True, per CustomerTenant's own validator (FR-053d) —
+    before voice_channel_enabled can be set True, per CustomerTenant's own validator (FR-053d) -
     enabling the toggle first, as a sales-lead-in step, is not a valid sequence."""
     app, container, _consent_store = _build_app(
         callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
@@ -1246,3 +1321,238 @@ def test_full_onboarding_and_consent_flow_enables_voice() -> None:
     document = container._items[(TENANT_ID, TENANT_ID)]
     tenant = from_document(CustomerTenant, document)
     assert tenant.may_accept_voice_call() is True
+
+
+# ---------------------------------------------------------------------------
+# Onboarding status endpoint tests
+# ---------------------------------------------------------------------------
+
+
+def test_onboarding_status_shows_pending_steps_for_new_tenant() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer good-token"}
+
+    client.post("/v1/tenants", headers=headers, json=_create_body())
+
+    response = client.get(f"/v1/tenants/{TENANT_ID}/onboarding/status", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tenantId"] == TENANT_ID
+    assert body["consentState"] == "pending"
+    assert body["steps"]["tenantCreated"]["completed"] is True
+    assert body["steps"]["consentConfirmed"]["completed"] is False
+    assert body["steps"]["offshoreConsentRecorded"]["completed"] is False
+    assert body["steps"]["voiceEnabled"]["completed"] is False
+    assert "onboarding/confirm" in body["nextAction"]
+
+
+def test_onboarding_status_guides_next_action_after_consent() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer good-token"}
+
+    client.post("/v1/tenants", headers=headers, json=_create_body())
+    confirmed = client.post(
+        f"/v1/tenants/{TENANT_ID}/onboarding/confirm",
+        headers=headers,
+        json={"note": "confirmed by customer admin via email"},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    response = client.get(f"/v1/tenants/{TENANT_ID}/onboarding/status", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["consentState"] == "granted"
+    assert body["steps"]["consentConfirmed"]["completed"] is True
+    assert body["steps"]["offshoreConsentRecorded"]["completed"] is False
+    assert "offshore-inference-consent" in body["nextAction"]
+
+
+def test_onboarding_status_complete_when_all_done() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer good-token"}
+
+    client.post("/v1/tenants", headers=headers, json=_create_body())
+    client.post(
+        f"/v1/tenants/{TENANT_ID}/onboarding/confirm",
+        headers=headers,
+        json={"note": "confirmed by customer admin via email"},
+    )
+    client.post(
+        "/v1/tenants/offshore-inference-consent",
+        headers=headers,
+        json={"disclosureVersion": CURRENT_DISCLOSURE_VERSION},
+    )
+    client.post(
+        f"/v1/tenants/{TENANT_ID}/voice-channel",
+        headers=headers,
+        json={"enabled": True, "note": "sold with voice per SOW-1"},
+    )
+
+    response = client.get(f"/v1/tenants/{TENANT_ID}/onboarding/status", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["steps"]["tenantCreated"]["completed"] is True
+    assert body["steps"]["consentConfirmed"]["completed"] is True
+    assert body["steps"]["offshoreConsentRecorded"]["completed"] is True
+    assert body["steps"]["voiceEnabled"]["completed"] is True
+    assert "complete" in body["nextAction"].lower()
+
+
+def test_onboarding_status_requires_operator_role() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(REQUESTER_ID, roles=(CallerRole.REQUESTER,))}
+    )
+    client = TestClient(app)
+
+    response = client.get(
+        f"/v1/tenants/{TENANT_ID}/onboarding/status",
+        headers={"Authorization": "Bearer good-token"},
+    )
+    assert response.status_code == 403
+
+
+def test_onboarding_status_404_for_unknown_tenant() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+
+    response = client.get(
+        f"/v1/tenants/{TENANT_ID}/onboarding/status",
+        headers={"Authorization": "Bearer good-token"},
+    )
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Quick-onboard endpoint tests
+# ---------------------------------------------------------------------------
+
+
+def _quick_onboard_body(**overrides: Any) -> dict[str, Any]:
+    body = {
+        "tenantId": TENANT_ID,
+        "displayName": "Test Customer",
+        "approvedRegions": ["australiaeast"],
+        "dataResidencyRegions": ["australiaeast"],
+        "consentNote": "own dev tenant, self-confirmed",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_quick_onboard_completes_all_steps() -> None:
+    app, container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer good-token"}
+
+    response = client.post(
+        "/v1/tenants/onboarding/quick-onboard",
+        headers=headers,
+        json=_quick_onboard_body(
+            voiceEnabled=True,
+            voiceNote="voice included in this engagement",
+        ),
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["steps"]["tenantCreated"]["completed"] is True
+    assert body["steps"]["consentConfirmed"]["completed"] is True
+    assert body["steps"]["offshoreConsentRecorded"]["completed"] is True
+    assert body["steps"]["voiceEnabled"]["completed"] is True
+    assert body["consentState"] == "granted"
+    assert "complete" in body["nextAction"].lower()
+
+    # Verify the underlying tenant record is fully onboarded.
+    document = container._items[(TENANT_ID, TENANT_ID)]
+    tenant = from_document(CustomerTenant, document)
+    assert tenant.may_accept_voice_call() is True
+    assert tenant.consent_confirmed_by_object_id == OPERATOR_ID
+    assert tenant.consent_confirmation_note == "own dev tenant, self-confirmed"
+
+
+def test_quick_onboard_without_voice_leaves_voice_disabled() -> None:
+    app, container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer good-token"}
+
+    response = client.post(
+        "/v1/tenants/onboarding/quick-onboard",
+        headers=headers,
+        json=_quick_onboard_body(),
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["steps"]["consentConfirmed"]["completed"] is True
+    assert body["steps"]["offshoreConsentRecorded"]["completed"] is True
+    assert body["steps"]["voiceEnabled"]["completed"] is False
+
+    document = container._items[(TENANT_ID, TENANT_ID)]
+    tenant = from_document(CustomerTenant, document)
+    assert tenant.consent_state == ConsentState.GRANTED
+    assert tenant.offshore_inference_consent is not None
+    assert tenant.voice_channel_enabled is False
+
+
+def test_quick_onboard_requires_operator_role() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(REQUESTER_ID, roles=(CallerRole.REQUESTER,))}
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/tenants/onboarding/quick-onboard",
+        headers={"Authorization": "Bearer good-token"},
+        json=_quick_onboard_body(),
+    )
+    assert response.status_code == 403
+
+
+def test_quick_onboard_rejects_mismatched_tenant() -> None:
+    """quick-onboard is only for the operator's own tenant (caller tid must match tenantId)."""
+    caller = _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))
+    caller = AuthenticatedCaller(
+        object_id=caller.object_id,
+        tenant_id="99999999-9999-9999-9999-999999999999",
+        display_name=caller.display_name,
+        roles=caller.roles,
+        token_expires_at=caller.token_expires_at,
+    )
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": caller}
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/tenants/onboarding/quick-onboard",
+        headers={"Authorization": "Bearer good-token"},
+        json=_quick_onboard_body(),
+    )
+    assert response.status_code == 403
+
+
+def test_quick_onboard_requires_voice_note_when_enabled() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/tenants/onboarding/quick-onboard",
+        headers={"Authorization": "Bearer good-token"},
+        json=_quick_onboard_body(voiceEnabled=True),
+    )
+    assert response.status_code == 400

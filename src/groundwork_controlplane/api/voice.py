@@ -83,12 +83,15 @@ from groundwork_controlplane.api.plans import (
 )
 from groundwork_controlplane.api.tenants import (
     BootstrapIdentityNotConfiguredError,
+    QuickOnboardParams,
+    _build_onboarding_status,
     _default_subscriptionless_tenant,
     attach_offshore_inference_consent,
     bootstrap_subscription_identity,
     confirm_customer_consent_attestation,
     create_customer_tenant_record,
     grant_customer_ado_org_access,
+    quick_onboard_tenant,
 )
 from groundwork_controlplane.approval.lookup import find_approval_by_plan_hash
 from groundwork_controlplane.approval.plan_identity import seal_plan
@@ -300,6 +303,28 @@ def _trigger_bootstrap_identity_tool_core() -> dict[str, Any]:
     }
 
 
+def _quick_onboard_tool_core() -> dict[str, Any]:
+    return {
+        "name": "quick_onboard",
+        "description": (
+            "Single-call onboarding for the operator's own tenant: creates the tenant record, "
+            "confirms consent, records offshore-inference consent, and optionally enables voice. "
+            "Use only when the operator themselves is the tenant owner confirming every "
+            "attestation in one step, not for onboarding a customer tenant."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "display_name": {"type": "string", "minLength": 1},
+                "consent_note": {"type": "string", "minLength": 1, "maxLength": 500},
+                "voice_enabled": {"type": "boolean"},
+                "voice_note": {"type": "string", "minLength": 1, "maxLength": 500},
+            },
+            "required": ["display_name", "consent_note"],
+        },
+    }
+
+
 _GENERATE_PLAN_TOOL_CORE = _generate_plan_tool_core()
 _GET_ONBOARDING_STATUS_TOOL_CORE = _get_onboarding_status_tool_core()
 _CREATE_TENANT_TOOL_CORE = _create_tenant_tool_core()
@@ -307,6 +332,7 @@ _CONFIRM_CUSTOMER_CONSENT_TOOL_CORE = _confirm_customer_consent_tool_core()
 _GRANT_ADO_ORG_ACCESS_TOOL_CORE = _grant_ado_org_access_tool_core()
 _CHECK_PLAN_STATUS_TOOL_CORE = _check_plan_status_tool_core()
 _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_CORE = _trigger_bootstrap_identity_tool_core()
+_QUICK_ONBOARD_TOOL_CORE = _quick_onboard_tool_core()
 # Voice Live session.update.tools: flat, per function-calling-quickstart.py.
 _GENERATE_PLAN_TOOL_VOICE_LIVE = {"type": "function", **_GENERATE_PLAN_TOOL_CORE}
 _GET_ONBOARDING_STATUS_TOOL_VOICE_LIVE = {
@@ -327,6 +353,7 @@ _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_VOICE_LIVE = {
     "type": "function",
     **_TRIGGER_BOOTSTRAP_IDENTITY_TOOL_CORE,
 }
+_QUICK_ONBOARD_TOOL_VOICE_LIVE = {"type": "function", **_QUICK_ONBOARD_TOOL_CORE}
 # /chat used to need a second, nested "Chat Completions" shape for these same tools. Now that it
 # calls the native client too (with auto function-invocation disabled — see
 # groundwork_controlplane.agents.providers.foundry_openai), it shares the flat shape above with
@@ -454,7 +481,10 @@ async def _run_get_onboarding_status_tool(
         return _tool_error("get_onboarding_status_failed", scrub_text(str(exc.detail)))
     except Exception as exc:
         return _tool_error("get_onboarding_status_failed", scrub_text(str(exc)))
-    return onboarding_facts_response(facts, tenant)
+    return {
+        **onboarding_facts_response(facts, tenant),
+        "onboardingStatus": _build_onboarding_status(tenant).model_dump(by_alias=True),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -697,6 +727,60 @@ async def _run_trigger_bootstrap_identity_tool(
     }
 
 
+async def _run_quick_onboard_tool(
+    conn: Conn, caller: AuthenticatedCaller, args: dict[str, Any]
+) -> dict[str, object]:
+    """Run the single-call onboarding flow, restricted to the operator's own tenant.
+
+    Quick-onboard collapses create + consent-confirm + offshore-consent + voice-enable into one
+    operation, so the voice model supplies only what it can reliably extract (`display_name`,
+    `consent_note`, and the optional voice toggle). The tenant identity and regions come from the
+    authenticated caller, not from conversation content — the same caller-own-tenancy rule as
+    ``_run_create_tenant_tool`` and the REST route's own ``caller.tid == tenantId`` guard.
+    """
+    voice_enabled = bool(args.get("voice_enabled", False))
+    voice_note = args.get("voice_note")
+    if voice_enabled and voice_note is None:
+        return _tool_error(
+            "voice_note_required",
+            "voice_note is required when voice_enabled is true in quick_onboard.",
+        )
+
+    params = QuickOnboardParams(
+        tenant_id=caller.tenant_id,
+        display_name=str(args["display_name"]),
+        approved_regions=frozenset({conn.app.state.settings.azure_location}),
+        data_residency_regions=frozenset({conn.app.state.settings.azure_location}),
+        consent_note=str(args["consent_note"]),
+        voice_enabled=voice_enabled,
+        voice_note=str(voice_note) if voice_note is not None else None,
+    )
+    try:
+        status = await quick_onboard_tenant(params=params, request=conn, caller=caller)
+    except AuthorizationError as exc:
+        return _tool_denied(scrub_text(exc.detail))
+    except HTTPException as exc:
+        return _tool_error("quick_onboard_failed", scrub_text(str(exc.detail)))
+
+    step_completion = {name: step.completed for name, step in status.steps.items()}
+    all_complete = all(step.completed for step in status.steps.values())
+    return {
+        "status": "onboarded" if all_complete else "partial",
+        "tenantId": status.tenant_id,
+        "consentState": status.consent_state,
+        "steps": step_completion,
+        **_verification_payload(
+            verified=all_complete,
+            evidence={
+                "consentState": status.consent_state,
+                "voiceEnabled": step_completion.get("voiceEnabled", False),
+                "offshoreConsentRecorded": step_completion.get("offshoreConsentRecorded", False),
+            },
+        ),
+        "next_action": status.next_action,
+    }
+
+
 @router.websocket("/ws/voice/{session_id}")
 async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
     """Real-time duplex voice session: browser audio ↔ this relay ↔ Azure AI Voice Live.
@@ -811,6 +895,7 @@ async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
                     _GRANT_ADO_ORG_ACCESS_TOOL_VOICE_LIVE,
                     _CHECK_PLAN_STATUS_TOOL_VOICE_LIVE,
                     _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_VOICE_LIVE,
+                    _QUICK_ONBOARD_TOOL_VOICE_LIVE,
                 ],
                 "tool_choice": "auto",
                 "temperature": config.temperature,
@@ -874,6 +959,8 @@ async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
                 sealed = await _run_grant_ado_org_access_tool(websocket, caller, args)
             elif tool_name == "check_plan_status":
                 sealed = await _run_check_plan_status_tool(websocket, caller, args)
+            elif tool_name == "quick_onboard":
+                sealed = await _run_quick_onboard_tool(websocket, caller, args)
             else:
                 sealed = await _run_trigger_bootstrap_identity_tool(websocket, caller, args)
         except AuthorizationError as exc:
@@ -1650,6 +1737,7 @@ async def voice_chat(
         _GRANT_ADO_ORG_ACCESS_TOOL_VOICE_LIVE,
         _CHECK_PLAN_STATUS_TOOL_VOICE_LIVE,
         _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_VOICE_LIVE,
+        _QUICK_ONBOARD_TOOL_VOICE_LIVE,
     ]
 
     messages = _conversation_messages(conversation)
@@ -1716,6 +1804,8 @@ async def voice_chat(
             onboarding = await _run_check_plan_status_tool(request, caller, args)
         elif call.name == "trigger_bootstrap_identity":
             onboarding = await _run_trigger_bootstrap_identity_tool(request, caller, args)
+        elif call.name == "quick_onboard":
+            onboarding = await _run_quick_onboard_tool(request, caller, args)
 
     # Text reply path
     reply = response.text or ""

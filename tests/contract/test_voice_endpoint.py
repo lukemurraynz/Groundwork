@@ -267,6 +267,7 @@ def _tenant(*, concurrency_cap: int = 3) -> CustomerTenant:
         approved_regions=frozenset({"australiaeast"}),
         data_residency_regions=frozenset({"australiaeast"}),
         concurrency_cap=concurrency_cap,
+        notification_email="customer@example.invalid",
     )
 
 

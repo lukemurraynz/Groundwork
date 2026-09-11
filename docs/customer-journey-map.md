@@ -10,10 +10,13 @@
   stage failure, the orchestrator halts and preserves partially-built, billable infrastructure in
   the customer's tenant by explicit design (ADR-0005). Rollback execution isn't built, and the
   recovery endpoint returns `501`. Nothing today tells the customer this *before* they try it.
-- A working notification path exists (Azure Communication Services Email, `NotificationDispatcher`)
-  but silently skips delivery if no address was captured, and drift detection
-  (`engine/drift_watch.py`) runs every 15 minutes with no code path to the customer at all;
-  both are cheap, reuse-not-rebuild fixes.
+- A working notification path exists (Azure Communication Services Email, `NotificationDispatcher`).
+  Delivery is guaranteed by an approval-time gate: `record_approval` refuses (409,
+  `notification-email-missing`) until a recipient is recorded on the tenant, and the operator
+  mutation path (`POST /v1/tenants/{id}/notification-email`) exists to record it outside the
+  conversational flow — the silent-skip failure is closed. Drift detection
+  (`engine/drift_watch.py`) still runs every 15 minutes with no code path to the customer at all;
+  that wiring remains a cheap, reuse-not-rebuild fix.
 - The clearest "aha" moment by design (seeing a full plan and AUD cost estimate before anything
   touches Azure) is a differentiator (ADR-0001) worth protecting as the product grows.
 - No customer interviews, support tickets, or usage analytics exist yet for this journey (the ADRs
@@ -127,7 +130,7 @@ The next section translates these pain points into concrete recommendations, gro
 
 | Recommendation | Customer outcome | Business outcome | Metric | Owner | Next step |
 |---|---|---|---|---|---|
-| Make `notification_email` a blocking precondition of approval instead of an optional field that fails silently at send time | Customer is guaranteed to hear about their deployment's outcome | Fewer "did my deployment finish?" support tickets | % completed deployments with a confirmed notification send | Control plane | Add the check to the approval validation path |
+| Make `notification_email` a blocking precondition of approval instead of an optional field that fails silently at send time | Customer is guaranteed to hear about their deployment's outcome | Fewer "did my deployment finish?" support tickets | % completed deployments with a confirmed notification send | Control plane | **Implemented**: `record_approval` raises `NotificationEmailMissingError` (409) when absent; `POST /v1/tenants/{id}/notification-email` records it outside the conversational flow |
 | Disclose in the halt notification that rollback isn't available yet, and lead with `retry`/`forward_fix` | Customer isn't blindsided by a `501` while their tenant has partial, billable infrastructure | Fewer trust-breaking support escalations after a halt | Count of post-halt rollback attempts that hit `501` | Orchestrator / Customer Success | Update the halt notification template |
 | Pre-check the approver's token claims (MFA/freshness) before they submit an approval, and prompt re-auth up front | Approver isn't rejected after already committing to approve | Fewer failed-then-retried approval calls | First-attempt approval failure rate on `step-up-authentication-required` | Control plane | Surface the check in the approval prompt across voice/chat/API |
 

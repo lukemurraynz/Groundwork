@@ -76,6 +76,17 @@ class LicensingDisclosureNotAcknowledgedError(Exception):
     an approval that never saw it acknowledged must not exist."""
 
 
+class NotificationEmailMissingError(Exception):
+    """The tenant has no recorded notification recipient at approval time.
+
+    Approving a plan makes a deployment possible, and a deployment that ends with an outcome
+    the customer cannot be told about is a silently-failed handover. The notifier would skip
+    delivery when ``CustomerTenant.notification_email`` is unset, which is why approval refuses
+    instead: the email must be recorded (POST /v1/tenants/{tenantId}/notification-email, or the
+    conversational capture during planning) before an approval may be recorded.
+    """
+
+
 class StepUpAuthenticationRequiredError(Exception):
     """Approval requires fresh or MFA-backed authentication evidence in the caller token.
 
@@ -113,6 +124,7 @@ async def record_approval(
     now: datetime,
     acknowledged_powerbi_viewer_licensing: bool = False,
     require_step_up_approval: bool = False,
+    notification_email: str | None = None,
 ) -> Approval | PendingApproval:
     """Record an approval or a second approval, returning whichever results.
 
@@ -125,6 +137,9 @@ async def record_approval(
             SKU is below F64; the same shape as ``acknowledged_cost_aud`` because it is the
             same class of guarantee — the caller confirms they were shown something material
             before authorising it.
+        notification_email: the tenant's recorded notification recipient
+            (``CustomerTenant.notification_email``). Required: approving without it guarantees
+            the outcome notification will be silently skipped, so approval refuses instead.
     """
     if plan_hash != sealed_plan.plan_hash:
         raise PlanHashMismatchError(
@@ -146,6 +161,13 @@ async def record_approval(
             f"viewing Power BI content will need a Pro or PPU licence; FR-013d requires the "
             f"disclosure to be acknowledged (acknowledgedPowerBiViewerLicensing) before this "
             f"plan can be approved"
+        )
+    if notification_email is None:
+        raise NotificationEmailMissingError(
+            "the tenant has no recorded notification_email; record it via "
+            "POST /v1/tenants/{tenantId}/notification-email (or the conversational capture "
+            "during planning) before approving — without it the deployment-outcome "
+            "notification would be silently skipped"
         )
 
     fabric_line = await fabric_capacity_line(

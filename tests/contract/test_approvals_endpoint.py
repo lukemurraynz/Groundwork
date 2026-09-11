@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from groundwork_contracts.approval import Approval, PendingApproval
 from groundwork_contracts.plan import DeploymentPlan, SealedDeploymentPlan
+from groundwork_contracts.tenant import ConsentState, CustomerTenant
 from groundwork_controlplane.api.approvals import router as approvals_router
 from groundwork_controlplane.api.auth import AuthenticatedCaller, AuthenticationError, CallerRole
 from groundwork_controlplane.api.errors import register_error_handlers
@@ -161,6 +162,7 @@ def _build_app(
     retail_prices_client: RetailPricesClient,
     callers: dict[str, AuthenticatedCaller],
     require_step_up_approval: bool = False,
+    tenant: CustomerTenant | None = None,
 ) -> tuple[FastAPI, _FakeArtefactStore]:
     app = FastAPI()
     app.include_router(approvals_router)
@@ -178,6 +180,16 @@ def _build_app(
     app.state.credential = _FakeCredential()
     app.state.plan_repository = TenantScopedRepository(
         plan_container, model_cls=SealedDeploymentPlan, id_field="plan_hash"
+    )
+    tenant_container = _FakeContainer()
+    active_tenant = tenant or _onboarded_tenant()
+    tenant_doc = active_tenant.model_dump(mode="json") | {
+        "id": active_tenant.tenant_id,
+        "tenantId": active_tenant.tenant_id,
+    }
+    tenant_container.seed(active_tenant.tenant_id, active_tenant.tenant_id, tenant_doc)
+    app.state.tenant_repository = TenantScopedRepository(
+        tenant_container, model_cls=CustomerTenant, id_field="tenant_id"
     )
     approvals_container = _FakeContainer()
     app.state.approval_repository = TenantScopedRepository(
@@ -220,9 +232,59 @@ def _sealed_plan(valid_plan: DeploymentPlan, *, now: datetime = NOW) -> SealedDe
     )
 
 
+def _onboarded_tenant() -> CustomerTenant:
+    """A tenant that has cleared the notification-recipient precondition (FR-002 / FR-004b)."""
+    return CustomerTenant(
+        tenant_id=TENANT_ID,
+        display_name="Test Customer",
+        consent_state=ConsentState.GRANTED,
+        consent_granted_at=datetime(2026, 7, 1, tzinfo=UTC),
+        approved_regions=frozenset({"australiaeast"}),
+        data_residency_regions=frozenset({"australiaeast"}),
+        notification_email="customer@example.invalid",
+    )
+
+
 @pytest.fixture
 def retail_prices_client() -> RetailPricesClient:
     return _fabric_price_client()
+
+
+async def test_approval_without_notification_email_is_409(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    """The journey-map fix: approving without a recorded notification recipient would let the
+    deployment-outcome notification fail silently, so approval refuses (409) instead."""
+    sealed = _sealed_plan(valid_plan)
+    expected_total = await _expected_monthly_total(
+        retail_prices_client, valid_plan.fabric_capacity_sku, valid_plan.region.value
+    )
+    no_email_tenant = _onboarded_tenant().model_copy(update={"notification_email": None})
+    app, _artefact_store = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=expected_total + 1000,
+        retail_prices_client=retail_prices_client,
+        callers={"good-token": _caller(APPROVER_ID)},
+        tenant=no_email_tenant,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        f"/v1/plans/{sealed.plan_hash}/approvals",
+        headers={"Authorization": "Bearer good-token"},
+        json={
+            "planHash": sealed.plan_hash,
+            "acknowledgedCostAud": expected_total,
+            "acknowledgedPowerBiViewerLicensing": True,
+            "channel": "teams",
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["type"] == "https://groundwork.invalid/problems/notification-email-missing"
+    assert "notification_email" in body["detail"]
 
 
 async def test_approval_below_threshold_completes_immediately(

@@ -799,6 +799,8 @@ def _tenant_response(tenant: CustomerTenant) -> dict[str, object]:
             if tenant.offshore_inference_consent
             else None
         ),
+        "notificationEmail": tenant.notification_email,
+        "contactDisplayName": tenant.contact_display_name,
     }
 
 
@@ -1229,6 +1231,103 @@ async def invite_admin(
         "emailOperationId": operation_id,
         "invitedBy": caller.object_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# Notification email — the operator-recorded recipient whose absence used to fail
+# silently at notification time instead of loudly at approval time
+# ---------------------------------------------------------------------------
+
+
+class SetNotificationEmailRequest(BaseModel):
+    """Operator attestation that records the customer's reconfirmed notification email.
+
+    Same shape and reasoning as :class:`RecordSubscriptionEntitlementRequest`: this is the
+    mutation path for a gated precondition that previously had none outside the voice
+    conversational flow. ``CustomerTenant.notification_email`` was only ever written by the
+    voice plan path's ``persist_engagement_details``; a REST/CLI-only operator had no way to
+    record it, so the orchestrator's notifier would silently skip every outcome notification.
+    ``note`` is required — recording an email is an audit-trail change, not a form field.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    email: Annotated[str, Field(alias="email", pattern=_ADMIN_EMAIL_PATTERN)]
+    display_name: Annotated[
+        str | None, Field(alias="displayName", min_length=1, max_length=200)
+    ] = None
+    note: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+async def record_tenant_notification_email(
+    *,
+    tenant_id: str,
+    email: str,
+    display_name: str | None,
+    note: str,
+    request: Request | WebSocket,
+    caller: AuthenticatedCaller,
+) -> CustomerTenant:
+    """Record (or replace) the tenant's notification recipient — operator-attested.
+
+    Idempotent replace: re-recording the same email with a new note is a legitimate
+    re-confirmation, not a conflict. The customer is expected to re-confirm the address during
+    conversation (FR-002 / FR-004b); this route is the operator-side equivalent for REST/CLI
+    onboarding when no conversational capture has happened.
+    """
+    caller.require_role(CallerRole.OPERATOR)
+
+    tenant_repository = request.app.state.tenant_repository
+    tenant = await tenant_repository.read(tenant_id, tenant_id)
+    if tenant is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"tenant {tenant_id!r} not found. "
+                "POST /v1/tenants to create the tenant record first."
+            ),
+        )
+
+    update: dict[str, str | None] = {
+        "notification_email": email,
+        "contact_display_name": display_name,
+    }
+    updated = tenant.model_copy(update=update)
+    updated = CustomerTenant.model_validate(updated.model_dump())
+    replaced = await tenant_repository.replace(tenant_id, updated)
+    logger.info(
+        "notification email recorded tenant=%s operator=%s note=%s",
+        tenant_id,
+        caller.object_id,
+        note,
+    )
+    return replaced
+
+
+@router.post("/{tenant_id}/notification-email", status_code=201)
+async def set_notification_email(
+    tenant_id: str,
+    body: SetNotificationEmailRequest,
+    request: Request,
+    caller: Annotated[AuthenticatedCaller, Depends(get_authenticated_caller)],
+) -> dict[str, object]:
+    """Record the customer's reconfirmed notification email on the tenant record.
+
+    This is the mutation path that makes the approval-time notification gate satisfiable from
+    REST/CLI: without it, ``CustomerTenant.notification_email`` could only ever be written by
+    the voice conversational flow, and an approval of a plan whose email was never persisted
+    would be refused by :class:`~groundwork_controlplane.approval.service.record_approval`
+    with ``NotificationEmailMissingError`` (409).
+    """
+    replaced = await record_tenant_notification_email(
+        tenant_id=tenant_id,
+        email=body.email,
+        display_name=body.display_name,
+        note=body.note,
+        request=request,
+        caller=caller,
+    )
+    return _tenant_response(replaced)
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ from groundwork_controlplane.approval.service import (
     DuplicateApprovalError,
     LicensingDisclosureNotAcknowledgedError,
     NonDurableApprovalChannelError,
+    NotificationEmailMissingError,
     PlanExpiredError,
     PlanHashMismatchError,
     StepUpAuthenticationRequiredError,
@@ -217,6 +218,18 @@ def register_error_handlers(app: FastAPI) -> None:
             status=409,
             problem_type="licensing-disclosure-not-acknowledged",
             title="Power BI viewer-licensing disclosure must be acknowledged",
+            detail=str(exc),
+        )
+
+    @app.exception_handler(NotificationEmailMissingError)
+    async def _notification_email_missing(
+        request: Request, exc: NotificationEmailMissingError
+    ) -> JSONResponse:
+        return _problem(
+            request,
+            status=409,
+            problem_type="notification-email-missing",
+            title="No notification recipient is recorded for this tenant",
             detail=str(exc),
         )
 

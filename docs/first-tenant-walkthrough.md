@@ -115,6 +115,24 @@ curl -sS "$HOST/v1/tenants/<your-tenant-id>" -H "Authorization: Bearer $TOKEN"
 `$HOST/static/voice.html`, sign in, and voice should connect instead of closing the socket with
 `voice not enabled for this tenant`.
 
+## Before you approve a deployment
+
+Approval refuses (409, `notification-email-missing`) until the tenant has a recorded notification
+recipient, so the deployment-outcome email can never be silently skipped. The conversational flow
+captures this during planning; for REST/CLI onboarding where it never got captured, record it once:
+
+```bash
+curl -sS -X POST "$HOST/v1/tenants/<your-tenant-id>/notification-email" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{
+    "email": "customer@example.com",
+    "displayName": "Jane Customer",
+    "note": "reconfirmed by customer via Teams 2026-09-11"
+  }'
+```
+
+Re-recording the address is idempotent re-confirmation, not a conflict.
+
 If you get as far as actually approving a deployment plan and hit a `step-up-authentication-required`
 403, that's a separate, later gate (`GROUNDWORK_REQUIRE_STEP_UP_APPROVAL`, on by default; see
 [ADR-0011](adr/0011-voice-alone-authorises-irreversible-actions.md)), not this onboarding sequence.

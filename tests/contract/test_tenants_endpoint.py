@@ -825,6 +825,92 @@ def test_verify_consent_404_for_unknown_tenant() -> None:
     assert response.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# Notification-email endpoint tests (the approval-gate's mutation path)
+# ---------------------------------------------------------------------------
+
+
+def test_set_notification_email_records_recipient() -> None:
+    app, container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+    client.post("/v1/tenants", headers={"Authorization": "Bearer good-token"}, json=_create_body())
+
+    response = client.post(
+        f"/v1/tenants/{TENANT_ID}/notification-email",
+        headers={"Authorization": "Bearer good-token"},
+        json={
+            "email": "customer@example.invalid",
+            "displayName": "Jane Customer",
+            "note": "reconfirmed by customer via Teams 2026-09-11",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["notificationEmail"] == "customer@example.invalid"
+    document = container._items[(TENANT_ID, TENANT_ID)]
+    tenant = from_document(CustomerTenant, document)
+    assert tenant.notification_email == "customer@example.invalid"
+    assert tenant.contact_display_name == "Jane Customer"
+
+
+def test_set_notification_email_replaces_existing() -> None:
+    """Idempotent re-confirmation: recording a fresh address replaces the old one, and a repeat
+    of the same address is a legitimate re-attestation, not a conflict."""
+    app, container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+    client.post("/v1/tenants", headers={"Authorization": "Bearer good-token"}, json=_create_body())
+    headers = {"Authorization": "Bearer good-token"}
+
+    first = client.post(
+        f"/v1/tenants/{TENANT_ID}/notification-email",
+        headers=headers,
+        json={"email": "old@example.invalid", "note": "original capture"},
+    )
+    assert first.status_code == 201, first.text
+
+    second = client.post(
+        f"/v1/tenants/{TENANT_ID}/notification-email",
+        headers=headers,
+        json={"email": "customer@example.invalid", "note": "reconfirmed 2026-09-11"},
+    )
+    assert second.status_code == 201, second.text
+    document = container._items[(TENANT_ID, TENANT_ID)]
+    tenant = from_document(CustomerTenant, document)
+    assert tenant.notification_email == "customer@example.invalid"
+
+
+def test_set_notification_email_requires_operator_role() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(REQUESTER_ID, roles=(CallerRole.REQUESTER,))}
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        f"/v1/tenants/{TENANT_ID}/notification-email",
+        headers={"Authorization": "Bearer good-token"},
+        json={"email": "customer@example.invalid", "note": "reconfirmed"},
+    )
+    assert response.status_code == 403
+
+
+def test_set_notification_email_404_for_unknown_tenant() -> None:
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        f"/v1/tenants/{TENANT_ID}/notification-email",
+        headers={"Authorization": "Bearer good-token"},
+        json={"email": "customer@example.invalid", "note": "reconfirmed"},
+    )
+    assert response.status_code == 404
+
+
 def test_grant_ado_org_access_reports_member_pending_pca() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)

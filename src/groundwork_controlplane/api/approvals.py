@@ -119,6 +119,8 @@ async def create_approval(
     )
 
     now = _now(request)
+    tenant_repository = request.app.state.tenant_repository
+    tenant = await tenant_repository.read(caller.tenant_id, caller.tenant_id)
     record = await record_approval(
         sealed_plan=sealed,
         existing=existing,
@@ -132,6 +134,7 @@ async def create_approval(
         now=now,
         acknowledged_powerbi_viewer_licensing=body.acknowledged_powerbi_viewer_licensing,
         require_step_up_approval=request.app.state.settings.governance.require_step_up_approval,
+        notification_email=tenant.notification_email if tenant is not None else None,
     )
 
     if isinstance(record, PendingApproval):

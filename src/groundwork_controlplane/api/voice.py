@@ -1903,6 +1903,17 @@ class VoiceApprovalRequest(BaseModel):
     button on its acknowledgement."""
 
 
+async def _tenant_notification_email(request: Request, caller: AuthenticatedCaller) -> str | None:
+    """Resolve the tenant's recorded notification recipient for the approval gate.
+
+    An absent tenant record or absent email both read as ``None`` — the approval gate in
+    ``record_approval`` raises the named ``NotificationEmailMissingError`` rather than this
+    helper failing on a lookup, so the caller gets one consistent, actionable 409 either way.
+    """
+    tenant = await request.app.state.tenant_repository.read(caller.tenant_id, caller.tenant_id)
+    return tenant.notification_email if tenant is not None else None
+
+
 @router.post("/approve")
 async def voice_approve(
     request: Request,
@@ -1952,6 +1963,7 @@ async def voice_approve(
         now=_now(request),
         acknowledged_powerbi_viewer_licensing=body.acknowledged_powerbi_viewer_licensing,
         require_step_up_approval=request.app.state.settings.governance.require_step_up_approval,
+        notification_email=await _tenant_notification_email(request, caller),
     )
 
     if isinstance(record, PendingApproval):

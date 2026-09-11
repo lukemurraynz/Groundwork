@@ -44,7 +44,7 @@ from groundwork_controlplane.api.auth import AuthenticatedCaller, Authentication
 from groundwork_controlplane.api.errors import register_error_handlers
 from groundwork_controlplane.api.voice import router as voice_router
 from groundwork_controlplane.approval.plan_identity import seal_plan
-from groundwork_orchestrator.state.cosmos import TenantScopedRepository
+from groundwork_orchestrator.state.cosmos import TenantRegistry, TenantScopedRepository
 from groundwork_shared.config.blueprints import load_blueprint
 from groundwork_shared.config.settings import GovernanceSettings, ResidencySettings
 from groundwork_shared.costing.estimator import compose_estimate, fabric_capacity_line
@@ -92,7 +92,12 @@ class _FakeContainer:
     ):
         bound_value = next((p["value"] for p in (parameters or []) if p["name"] == "@value"), None)
         for (tenant, _item_id), doc in self._items.items():
-            if tenant != partition_key:
+            if partition_key is not None and tenant != partition_key:
+                continue
+            if query.startswith("SELECT VALUE c.tenantId"):
+                # TenantRegistry.list_tenant_ids(): the real Cosmos SDK evaluates the projection;
+                # an unchanging container body dict would otherwise leak in place of the id.
+                yield doc.get("tenantId")
                 continue
             if "c.id = @value" in query and doc.get("id") != bound_value:
                 continue
@@ -359,6 +364,7 @@ def _build_app(
     app.state.tenant_repository = TenantScopedRepository(
         tenant_container, model_cls=CustomerTenant, id_field="tenant_id"
     )
+    app.state.tenant_registry = TenantRegistry(tenant_container)
 
     deployment_container = _FakeContainer()
     app.state.deployment_repository = TenantScopedRepository(
@@ -1032,6 +1038,170 @@ def test_voice_chat_get_onboarding_status_includes_step_completion(
     assert status["steps"]["offshoreConsentRecorded"]["completed"] is False
     assert status["steps"]["voiceEnabled"]["completed"] is False
     assert "offshore-inference-consent" in status["nextAction"]
+
+
+def test_voice_chat_get_offshore_inference_disclosure_returns_text(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    """The disclosure tool returns the canonical FR-053d text verbatim so the model can read it
+    aloud before consent — the transcript then evidences what the customer was shown."""
+    sealed = _sealed_plan(valid_plan)
+    app, _deployment_container, _artefacts = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=100000.0,
+        retail_prices_client=retail_prices_client,
+        callers={"good-token": _caller(APPROVER_ID)},
+    )
+    app.state.planning_agent = _FakeVoicePlanningAgent(replies=["Here it is."], plan=valid_plan)
+    app.state.voice_tool_client = _FakeChatClient(
+        [
+            _FakeChatResponse(
+                _FakeChatMessage(
+                    content="Here it is.",
+                    tool_calls=[
+                        _FakeToolCall(name="get_offshore_inference_disclosure", arguments="{}")
+                    ],
+                )
+            )
+        ]
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/voice/chat",
+        headers=_auth_headers("good-token"),
+        params={"message": "Show me the offshore disclosure."},
+    )
+
+    assert response.status_code == 200, response.text
+    onboarding = response.json()["onboarding"]
+    assert onboarding["status"] == "ok"
+    assert onboarding["disclosureVersion"] == "1.0.0"
+    assert "Voice Live" in onboarding["disclosure"]
+    assert "outside your configured" in onboarding["disclosure"]
+    assert "never stored" in onboarding["disclosure"]
+
+
+def test_voice_chat_record_offshore_inference_consent_attaches_to_tenant(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    """The consent tool records the artefact and attaches it to the tenant record — the field the
+    voice enablement gate reads — so a voiced consent actually enables voice."""
+    sealed = _sealed_plan(valid_plan)
+    app, _deployment_container, _artefacts = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=100000.0,
+        retail_prices_client=retail_prices_client,
+        callers={"good-token": _caller(APPROVER_ID)},
+    )
+    app.state.consent_store = _FakeConsentStore()
+    app.state.planning_agent = _FakeVoicePlanningAgent(
+        replies=["Consent recorded."], plan=valid_plan
+    )
+    app.state.voice_tool_client = _FakeChatClient(
+        [
+            _FakeChatResponse(
+                _FakeChatMessage(
+                    content="Consent recorded.",
+                    tool_calls=[
+                        _FakeToolCall(name="record_offshore_inference_consent", arguments="{}")
+                    ],
+                )
+            )
+        ]
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/voice/chat",
+        headers=_auth_headers("good-token"),
+        params={"message": "I consent to offshore inference."},
+    )
+
+    assert response.status_code == 200, response.text
+    onboarding = response.json()["onboarding"]
+    assert onboarding["status"] == "recorded"
+    assert onboarding["verified"] is True
+    assert onboarding["disclosureVersion"] == "1.0.0"
+
+
+def test_voice_chat_list_tenants_returns_portfolio(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    """An operator can ask for the whole portfolio by voice; the seeded tenant appears with its
+    onboarding state summarised."""
+    sealed = _sealed_plan(valid_plan)
+    app, _deployment_container, _artefacts = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=100000.0,
+        retail_prices_client=retail_prices_client,
+        callers={"good-token": _caller(APPROVER_ID, roles=(CallerRole.OPERATOR,))},
+    )
+    app.state.planning_agent = _FakeVoicePlanningAgent(
+        replies=["Here are your tenants."], plan=valid_plan
+    )
+    app.state.voice_tool_client = _FakeChatClient(
+        [
+            _FakeChatResponse(
+                _FakeChatMessage(
+                    content="Here are your tenants.",
+                    tool_calls=[_FakeToolCall(name="list_tenants", arguments="{}")],
+                )
+            )
+        ]
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/voice/chat",
+        headers=_auth_headers("good-token"),
+        params={"message": "What tenants do I manage?"},
+    )
+
+    assert response.status_code == 200, response.text
+    onboarding = response.json()["onboarding"]
+    assert onboarding["status"] == "ok"
+    assert onboarding["tenantCount"] == 1
+    assert onboarding["tenants"][0]["tenantId"] == TENANT_ID
+    assert onboarding["tenants"][0]["consentState"] == "granted"
+    assert onboarding["tenants"][0]["notificationEmailRecorded"] is True
+
+
+def test_voice_chat_list_tenants_denied_for_non_operator(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    sealed = _sealed_plan(valid_plan)
+    app, _deployment_container, _artefacts = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=100000.0,
+        retail_prices_client=retail_prices_client,
+        callers={"good-token": _caller(APPROVER_ID)},
+    )
+    app.state.planning_agent = _FakeVoicePlanningAgent(
+        replies=["I cannot do that."], plan=valid_plan
+    )
+    app.state.voice_tool_client = _FakeChatClient(
+        [
+            _FakeChatResponse(
+                _FakeChatMessage(
+                    content="I cannot do that.",
+                    tool_calls=[_FakeToolCall(name="list_tenants", arguments="{}")],
+                )
+            )
+        ]
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/voice/chat",
+        headers=_auth_headers("good-token"),
+        params={"message": "What tenants do I manage?"},
+    )
+
+    assert response.status_code == 200, response.text
+    onboarding = response.json()["onboarding"]
+    assert onboarding["status"] == "denied"
+    assert onboarding["verified"] is False
 
 
 def test_voice_chat_trigger_bootstrap_identity_returns_verified_result(

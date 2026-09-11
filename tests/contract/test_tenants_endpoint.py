@@ -911,6 +911,22 @@ def test_set_notification_email_404_for_unknown_tenant() -> None:
     assert response.status_code == 404
 
 
+def test_offshore_inference_disclosure_serves_text_to_anyone() -> None:
+    """The FR-053d disclosure is public product content — fetchable without a token, so the
+    customer's own admin (or the operator) can read what consent actually covers."""
+    app, _container, _consent_store = _build_app(
+        callers={"good-token": _caller(OPERATOR_ID, roles=(CallerRole.OPERATOR,))}
+    )
+    client = TestClient(app)
+
+    response = client.get("/v1/tenants/onboarding/offshore-inference-disclosure")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["disclosureVersion"] == CURRENT_DISCLOSURE_VERSION
+    assert "Voice Live" in body["disclosure"]
+    assert "never stored" in body["disclosure"]
+
+
 def test_grant_ado_org_access_reports_member_pending_pca() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)

@@ -48,6 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from groundwork_channels.voice.consent import (
     CURRENT_DISCLOSURE_VERSION,
+    OFFSHORE_INFERENCE_DISCLOSURE,
     OffshoreInferenceConsentStore,
 )
 from groundwork_channels.voice.enablement import VoiceEnablementGate
@@ -325,6 +326,44 @@ def _quick_onboard_tool_core() -> dict[str, Any]:
     }
 
 
+def _get_offshore_inference_disclosure_tool_core() -> dict[str, Any]:
+    return {
+        "name": "get_offshore_inference_disclosure",
+        "description": (
+            "Fetch the current offshore-inference disclosure text verbatim. Read it aloud to "
+            "the customer and confirm they consent before calling "
+            "record_offshore_inference_consent — consent is only valid against the disclosure "
+            "the customer was actually shown."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+
+
+def _record_offshore_inference_consent_tool_core() -> dict[str, Any]:
+    return {
+        "name": "record_offshore_inference_consent",
+        "description": (
+            "Record the caller's offshore-inference consent (FR-053d) against the current "
+            "disclosure version. Call only after the customer heard and accepted the "
+            "disclosure from get_offshore_inference_disclosure. Identity comes from the "
+            "validated token, never from conversation."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+
+
+def _list_tenants_tool_core() -> dict[str, Any]:
+    return {
+        "name": "list_tenants",
+        "description": (
+            "List the onboarding state of every tenant the operator manages: tenant id, display "
+            "name, consent state, voice channel, and whether a notification recipient is "
+            "recorded. Requires the OPERATOR role."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+
+
 _GENERATE_PLAN_TOOL_CORE = _generate_plan_tool_core()
 _GET_ONBOARDING_STATUS_TOOL_CORE = _get_onboarding_status_tool_core()
 _CREATE_TENANT_TOOL_CORE = _create_tenant_tool_core()
@@ -333,6 +372,9 @@ _GRANT_ADO_ORG_ACCESS_TOOL_CORE = _grant_ado_org_access_tool_core()
 _CHECK_PLAN_STATUS_TOOL_CORE = _check_plan_status_tool_core()
 _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_CORE = _trigger_bootstrap_identity_tool_core()
 _QUICK_ONBOARD_TOOL_CORE = _quick_onboard_tool_core()
+_GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_CORE = _get_offshore_inference_disclosure_tool_core()
+_RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_CORE = _record_offshore_inference_consent_tool_core()
+_LIST_TENANTS_TOOL_CORE = _list_tenants_tool_core()
 # Voice Live session.update.tools: flat, per function-calling-quickstart.py.
 _GENERATE_PLAN_TOOL_VOICE_LIVE = {"type": "function", **_GENERATE_PLAN_TOOL_CORE}
 _GET_ONBOARDING_STATUS_TOOL_VOICE_LIVE = {
@@ -354,6 +396,15 @@ _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_VOICE_LIVE = {
     **_TRIGGER_BOOTSTRAP_IDENTITY_TOOL_CORE,
 }
 _QUICK_ONBOARD_TOOL_VOICE_LIVE = {"type": "function", **_QUICK_ONBOARD_TOOL_CORE}
+_GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_VOICE_LIVE = {
+    "type": "function",
+    **_GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_CORE,
+}
+_RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_VOICE_LIVE = {
+    "type": "function",
+    **_RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_CORE,
+}
+_LIST_TENANTS_TOOL_VOICE_LIVE = {"type": "function", **_LIST_TENANTS_TOOL_CORE}
 # /chat used to need a second, nested "Chat Completions" shape for these same tools. Now that it
 # calls the native client too (with auto function-invocation disabled — see
 # groundwork_controlplane.agents.providers.foundry_openai), it shares the flat shape above with
@@ -781,6 +832,107 @@ async def _run_quick_onboard_tool(
     }
 
 
+async def _run_get_offshore_inference_disclosure_tool(
+    conn: Conn, caller: AuthenticatedCaller
+) -> dict[str, object]:
+    """Return the current FR-053d disclosure text verbatim (R-tier, no arguments).
+
+    The voice model reads this aloud and the customer confirms before consent is recorded — the
+    conversation transcript (persisted per FR-053a) then carries the evidence that this exact
+    disclosure version was actually shown, which a REST consent call structurally cannot prove.
+    """
+    return {
+        "status": "ok",
+        "disclosureVersion": CURRENT_DISCLOSURE_VERSION,
+        "disclosure": OFFSHORE_INFERENCE_DISCLOSURE,
+        "next_action": (
+            "Read the disclosure aloud, confirm the customer accepts, then call "
+            "record_offshore_inference_consent."
+        ),
+    }
+
+
+async def _run_record_offshore_inference_consent_tool(
+    conn: Conn, caller: AuthenticatedCaller, args: dict[str, Any]
+) -> dict[str, object]:
+    """Record the caller's offshore-inference consent against the current disclosure (O-tier).
+
+    Identity comes from the validated token, never from conversation content (FR-007). Only a
+    concerned caller records consent — no operator role required, matching the REST consent
+    route. The response verifies the consent also landed on the tenant record (the field the
+    voice enablement gate reads).
+    """
+    try:
+        consent = await _record_and_attach_offshore_consent(conn, caller)
+    except HTTPException as exc:
+        return _tool_error("record_offshore_inference_consent_failed", scrub_text(str(exc.detail)))
+
+    tenant = await conn.app.state.tenant_repository.read(caller.tenant_id, caller.tenant_id)
+    attached = tenant is not None and tenant.offshore_inference_consent is not None
+    return {
+        "status": "recorded" if attached else "error",
+        "tenantId": caller.tenant_id,
+        "disclosureVersion": consent.disclosure_version,
+        "consentedAt": consent.consented_at.isoformat(),
+        "artefactUri": consent.artefact_uri,
+        **_verification_payload(
+            verified=attached,
+            evidence={"disclosureVersion": consent.disclosure_version},
+        ),
+        "next_action": (
+            "Offshore-inference consent is recorded; the voice channel is now permitted once "
+            "it is enabled for this tenant."
+            if attached
+            else "Consent artefact was written but could not be verified on the tenant record; "
+            "re-check onboarding status."
+        ),
+    }
+
+
+async def _run_list_tenants_tool(conn: Conn, caller: AuthenticatedCaller) -> dict[str, object]:
+    """List the operator's tenant portfolio (R-tier, operator role).
+
+    Iterates the tenant registry's partition ids and reads each tenant record — the same
+    ``TenantRegistry`` the control plane uses at startup to seed the token policy. The operator
+    role is the broad, portfolio-level scope every other tenant-read route already relies on.
+    """
+    try:
+        caller.require_role(CallerRole.OPERATOR)
+    except AuthorizationError as exc:
+        return _tool_denied(scrub_text(exc.detail))
+
+    registry = getattr(conn.app.state, "tenant_registry", None)
+    if registry is None:
+        return _tool_error(
+            "tenant_registry_unavailable", "Tenant registry is not configured on this instance."
+        )
+    tenant_repository = conn.app.state.tenant_repository
+    portfolio: list[dict[str, object]] = []
+    async for tenant_id in registry.list_tenant_ids():
+        tenant = await tenant_repository.read(str(tenant_id), str(tenant_id))
+        if tenant is None:
+            continue
+        portfolio.append(
+            {
+                "tenantId": tenant.tenant_id,
+                "displayName": tenant.display_name,
+                "consentState": tenant.consent_state.value,
+                "voiceEnabled": tenant.voice_channel_enabled,
+                "notificationEmailRecorded": tenant.notification_email is not None,
+            }
+        )
+    return {
+        "status": "ok" if portfolio else "empty",
+        "tenantCount": len(portfolio),
+        "tenants": portfolio,
+        "next_action": (
+            "Pick a tenant and call get_onboarding_status for its step checklist."
+            if portfolio
+            else "No tenant records exist yet; create one via create_tenant or quick_onboard."
+        ),
+    }
+
+
 @router.websocket("/ws/voice/{session_id}")
 async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
     """Real-time duplex voice session: browser audio ↔ this relay ↔ Azure AI Voice Live.
@@ -896,6 +1048,9 @@ async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
                     _CHECK_PLAN_STATUS_TOOL_VOICE_LIVE,
                     _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_VOICE_LIVE,
                     _QUICK_ONBOARD_TOOL_VOICE_LIVE,
+                    _GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_VOICE_LIVE,
+                    _RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_VOICE_LIVE,
+                    _LIST_TENANTS_TOOL_VOICE_LIVE,
                 ],
                 "tool_choice": "auto",
                 "temperature": config.temperature,
@@ -961,6 +1116,12 @@ async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
                 sealed = await _run_check_plan_status_tool(websocket, caller, args)
             elif tool_name == "quick_onboard":
                 sealed = await _run_quick_onboard_tool(websocket, caller, args)
+            elif tool_name == "get_offshore_inference_disclosure":
+                sealed = await _run_get_offshore_inference_disclosure_tool(websocket, caller)
+            elif tool_name == "record_offshore_inference_consent":
+                sealed = await _run_record_offshore_inference_consent_tool(websocket, caller, args)
+            elif tool_name == "list_tenants":
+                sealed = await _run_list_tenants_tool(websocket, caller)
             else:
                 sealed = await _run_trigger_bootstrap_identity_tool(websocket, caller, args)
         except AuthorizationError as exc:
@@ -1224,6 +1385,31 @@ async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _record_and_attach_offshore_consent(
+    request: Conn, caller: AuthenticatedCaller
+) -> OffshoreInferenceConsent:
+    """Record an offshore-inference consent artefact and attach it to the tenant record.
+
+    Shared by the ``POST /v1/voice/consent`` route and the ``record_offshore_inference_consent``
+    voice tool — one implementation, so both surfaces record identical artefacts. Identity comes
+    from the validated token (FR-007); the disclosure version is fixed to the currently published
+    one, so a caller can never consent against a stale or future disclosure.
+    """
+    consent_store: OffshoreInferenceConsentStore = request.app.state.consent_store
+    consent_id = str(uuid.uuid4())
+    consent: OffshoreInferenceConsent = await consent_store.record(
+        consent_id=consent_id,
+        consenting_identity_object_id=caller.object_id,
+        consenting_identity_display_name=caller.display_name,
+        disclosure_version=CURRENT_DISCLOSURE_VERSION,
+        now=_now(request),
+    )
+    await attach_offshore_inference_consent(
+        tenant_id=caller.tenant_id, consent=consent, request=request
+    )
+    return consent
+
+
 @router.post("/consent", status_code=201)
 async def record_consent(
     request: Request,
@@ -1248,18 +1434,7 @@ async def record_consent(
                 f"disclosure version {CURRENT_DISCLOSURE_VERSION!r}"
             ),
         )
-    consent_store: OffshoreInferenceConsentStore = request.app.state.consent_store
-    consent_id = str(uuid.uuid4())
-    consent: OffshoreInferenceConsent = await consent_store.record(
-        consent_id=consent_id,
-        consenting_identity_object_id=caller.object_id,
-        consenting_identity_display_name=caller.display_name,
-        disclosure_version=disclosure_version,
-        now=_now(request),
-    )
-    await attach_offshore_inference_consent(
-        tenant_id=caller.tenant_id, consent=consent, request=request
-    )
+    consent = await _record_and_attach_offshore_consent(request, caller)
     return consent.model_dump(mode="json")
 
 
@@ -1738,6 +1913,9 @@ async def voice_chat(
         _CHECK_PLAN_STATUS_TOOL_VOICE_LIVE,
         _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_VOICE_LIVE,
         _QUICK_ONBOARD_TOOL_VOICE_LIVE,
+        _GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_VOICE_LIVE,
+        _RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_VOICE_LIVE,
+        _LIST_TENANTS_TOOL_VOICE_LIVE,
     ]
 
     messages = _conversation_messages(conversation)
@@ -1806,6 +1984,12 @@ async def voice_chat(
             onboarding = await _run_trigger_bootstrap_identity_tool(request, caller, args)
         elif call.name == "quick_onboard":
             onboarding = await _run_quick_onboard_tool(request, caller, args)
+        elif call.name == "get_offshore_inference_disclosure":
+            onboarding = await _run_get_offshore_inference_disclosure_tool(request, caller)
+        elif call.name == "record_offshore_inference_consent":
+            onboarding = await _run_record_offshore_inference_consent_tool(request, caller, args)
+        elif call.name == "list_tenants":
+            onboarding = await _run_list_tenants_tool(request, caller)
 
     # Text reply path
     reply = response.text or ""

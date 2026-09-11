@@ -166,6 +166,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     state_store = CosmosStateStore(cosmos_client)
     registry = tenant_registry(state_store)
+    app.state.tenant_registry = registry
     onboarded = [tid async for tid in registry.list_tenant_ids()]
 
     multi_decoder = MultiTenantTokenDecoder(home_tenant_id=settings.entra.tenant_id)

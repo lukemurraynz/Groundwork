@@ -20,6 +20,23 @@ from groundwork_contracts.tenant import OffshoreInferenceConsent
 
 CURRENT_DISCLOSURE_VERSION: Final = "1.0.0"
 
+# The one canonical disclosure text (FR-053d) — shown verbatim on every surface that records
+# consent (voice narration, chat, and the REST disclosure endpoint), matching the pattern
+# ``groundwork_controlplane/costing/licensing.py`` uses for the Power BI viewer-licensing
+# disclosure. Consent is only meaningful against the text the customer was actually shown
+# (``groundwork_contracts/tenant.py``'s own warning), so the text and the version it describes
+# must stay in the same module and change together.
+OFFSHORE_INFERENCE_DISCLOSURE: Final = (
+    "Groundwork's voice channel uses Azure AI Voice Live for real-time speech. "
+    "To transcribe and understand what is said, a brief, transient portion of the call "
+    "is processed at an inference endpoint that may be located outside your configured "
+    "data-residency region (australia). "
+    "Raw audio is never stored or retained by Groundwork. "
+    "Recorded consent means you accept this transient offshore processing for the purpose "
+    "of the conversation. "
+    "Revoking this consent disables the voice channel but does not affect running deployments."
+)
+
 
 class BlobClientLike(Protocol):
     # Matches the real azure.storage.blob.aio return shape (a plain dict of blob properties, not

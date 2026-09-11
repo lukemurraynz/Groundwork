@@ -85,8 +85,10 @@ curl -sS -X POST "$HOST/v1/tenants/<your-tenant-id>/onboarding/confirm" \
 **3. Record offshore-inference consent.** This is the FR-053d disclosure: transient in-call audio
 may leave your data-residency region for inference, and this call is what records that you agreed
 to it. It writes an immutable artefact to blob storage *and* attaches the result to your tenant
-record: those two used to be disconnected. See `docs/adr/` if you're wondering why this call does
-both.
+record: those two used to be disconnected. The disclosure text is served verbatim by
+`GET /v1/tenants/onboarding/offshore-inference-disclosure` and, on the voice channel, read aloud by
+the agent before consent is recorded — the transcript then evidences what was shown. See `docs/adr/` if you're
+wondering why this call does both.
 
 ```bash
 curl -sS -X POST "$HOST/v1/tenants/offshore-inference-consent" \

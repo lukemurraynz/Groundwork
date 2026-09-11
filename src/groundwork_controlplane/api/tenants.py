@@ -57,6 +57,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from groundwork_channels.voice.consent import (
     CURRENT_DISCLOSURE_VERSION,
+    OFFSHORE_INFERENCE_DISCLOSURE,
     OffshoreInferenceConsentStore,
 )
 from groundwork_contracts.tenant import (
@@ -1110,6 +1111,23 @@ class RecordOffshoreInferenceConsentRequest(BaseModel):
     disclosure_version: Annotated[
         str, Field(alias="disclosureVersion", pattern=r"^\d+\.\d+\.\d+$")
     ] = CURRENT_DISCLOSURE_VERSION
+
+
+@router.get("/onboarding/offshore-inference-disclosure")
+async def get_offshore_inference_disclosure() -> dict[str, str]:
+    """Serve the current FR-053d offshore-inference disclosure text verbatim.
+
+    The REST twin of the voice ``get_offshore_inference_disclosure`` tool: consent is only
+    meaningful against the disclosure the customer was actually shown
+    (``groundwork_contracts/tenant.py``'s own warning), so the text has to be fetchable by every
+    surface that records consent, not just the voice channel. Requires no role — the disclosure
+    is public product content, and gating it behind the operator role would stop the customer's
+    own admin from reading it before consenting.
+    """
+    return {
+        "disclosureVersion": CURRENT_DISCLOSURE_VERSION,
+        "disclosure": OFFSHORE_INFERENCE_DISCLOSURE,
+    }
 
 
 @router.post("/offshore-inference-consent", status_code=201)

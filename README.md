@@ -153,7 +153,7 @@ Framework client), recorded from live deployment checks rather than the archive.
 ## Testing
 
 ```bash
-uv run pytest -q       # 944 tests: unit, contract, integration, security, resilience
+uv run pytest -q       # 949 tests: unit, contract, integration, security, resilience
 uv run ruff check src tests
 uv run mypy src/groundwork_contracts   # strict; the ADR-0001 boundary is typed, not just documented
 ```

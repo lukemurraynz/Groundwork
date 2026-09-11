@@ -12,8 +12,8 @@ reasoning and execution in separate services with separate identities, so the wo
 agent can do is produce a plan nobody approves.
 
 New to the repo? [`docs/customer-journey-map.md`](docs/customer-journey-map.md) walks through what
-Groundwork actually does end to end — onboarding, planning and approval, provisioning, and ongoing
-operation — with sequence and architecture diagrams, before you're in the code.
+Groundwork actually does end to end: onboarding, planning and approval, provisioning, and ongoing
+operation, with sequence and architecture diagrams, before you're in the code.
 
 ## What's in the box
 
@@ -21,7 +21,7 @@ operation — with sequence and architecture diagrams, before you're in the code
 | --- | --- |
 | **Control plane** (`src/groundwork_controlplane`) | Talks to the Foundry planning agent, prices the request against the Azure Retail Prices API, and validates it against the target tenant before anyone approves it. |
 | **Orchestrator** (`src/groundwork_orchestrator`) | Executes an approved plan stage by stage (landing zone, Fabric capacity, DevOps project, pipeline) with checkpointed state, so a failure resumes rather than restarts. |
-| **Voice channel** (`src/groundwork_channels/voice`) | The same conversational agent as chat, over real-time speech (Azure AI Voice Live) instead of text — it can onboard a tenant or request/approve a deployment by talking, using the identical tool set (`create_tenant`, `generate_plan`, `approve`) as the chat and UI channels. Gated behind consent and explicit per-tenant enablement. `voice.html` is the reference client. |
+| **Voice channel** (`src/groundwork_channels/voice`) | The same conversational agent as chat, over real-time speech (Azure AI Voice Live) instead of text, it can onboard a tenant or request/approve a deployment by talking, using the identical tool set (`create_tenant`, `generate_plan`, `approve`) as the chat and UI channels. Gated behind consent and explicit per-tenant enablement. `voice.html` is the reference client. |
 | **Contracts** (`src/groundwork_contracts`) | The schema every plan has to satisfy before the orchestrator will look at it. Strict-typed on purpose: this is the boundary in ADR-0001. |
 
 Both services run as separate AKS workloads with separate managed identities. The control plane can
@@ -135,8 +135,8 @@ has the reasoning behind every non-obvious infrastructure choice.
   Groundwork's own infrastructure and code.
 - [`docs/runbook.md`](docs/runbook.md) / [`docs/release-checklist.md`](docs/release-checklist.md) —
   what an operator does when something breaks, and the discipline around an `azd` release.
-The non-negotiables every design decision gets checked against — deterministic execution boundary,
-gated approval for irreversible actions, secretless identity — are stated directly in
+The non-negotiables every design decision gets checked against (deterministic execution boundary,
+  gated approval for irreversible actions, secretless identity) are stated directly in
 [ADR-0001](docs/adr/0001-ai-plans-deterministic-code-executes.md) and enforced in code
 (`tests/unit/test_import_boundaries.py`), not kept in a separate governing document.
 

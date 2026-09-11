@@ -288,7 +288,7 @@ registry at runtime), an attacker could substitute a malicious module.
   `resourceType`/`logicalName` is rejected at the boundary.
 - **Resolved 2026-09-07**: `groundwork_shared.config.blueprints.load_blueprint` now requires a
   sibling `blueprint.yaml.sha256` digest sidecar for every manifest and fails closed
-  (`BlueprintLoadError`) if it is missing or does not match — a tampered mirror is caught before
+  (`BlueprintLoadError`) if it is missing or does not match. A tampered mirror is caught before
   planning begins, not merely a build-time convention. `tests/unit/test_blueprint_catalogue.py`
   covers the missing-sidecar, mismatch, and shipped-manifest-matches-its-own-sidecar cases.
 
@@ -336,7 +336,7 @@ interpreting a customer utterance as approval and directly calling an internal a
 **Existing mitigations**
 - `voice.py` (L22-23): "Approval deliberately stays on the proven HTTP route (`/approve`, invoked
   by the frontend's Approve button) rather than becoming a tool the realtime model can invoke
-  mid-conversation — an approval must never be one more thing an LLM can decide to do."
+  mid-conversation; an approval must never be one more thing an LLM can decide to do."
 - `voice.py` L806-821 (system prompt): the model is explicitly told it cannot approve or deploy,
   and must not claim a deployment is running.
 - Only two tools exist at the Voice Live session level (L410-413): `generate_plan` and
@@ -388,6 +388,6 @@ agent-accessible server must fail the build.
 | P3 | T-009 | Blueprint YAML SHA-256 digest assertion at load time | Small | Low |
 | P3 | T-010 | Startup assertion on Foundry endpoint AU region + health-check annotation | Trivial | Low |
 | P4 | T-002 | Scrub Cosmos-sourced strings in tool-result construction | Trivial | Low |
-| P4 | T-006 | No action required — control depends on Microsoft JWKS integrity | None | Low |
+| P4 | T-006 | No action required; control depends on Microsoft JWKS integrity | None | Low |
 
 Threats T-003, T-011 have residual Low risk with existing controls and require no additional action.

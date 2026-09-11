@@ -1,25 +1,27 @@
-# Customer Journey Map: Groundwork — First Engagement (Onboarding Through Steady-State Operation)
+# Customer Journey Map: Groundwork, First Engagement (Onboarding Through Steady-State Operation)
 
 ## Executive Summary
 
-- Two friction points are already **named and documented in this codebase** — `AADSTS65001` at
-  token acquisition during onboarding, and `step-up-authentication-required` at approval — which
+- Two friction points are already named and documented in this codebase (`AADSTS65001` at
+  token acquisition during onboarding, and `step-up-authentication-required` at approval), which
   means the team has already felt them, but hasn't yet fixed them at the product-experience level
   (only in a doc callout).
-- The largest trust risk in the journey is the **provisioning failure branch**: on a permanent
+- The largest trust risk in the journey is the provisioning failure branch: on a permanent
   stage failure, the orchestrator halts and preserves partially-built, billable infrastructure in
-  the customer's tenant by explicit design (ADR-0005) — rollback execution isn't built, and the
+  the customer's tenant by explicit design (ADR-0005). Rollback execution isn't built, and the
   recovery endpoint returns `501`. Nothing today tells the customer this *before* they try it.
 - A working notification path exists (Azure Communication Services Email, `NotificationDispatcher`)
   but silently skips delivery if no address was captured, and drift detection
-  (`engine/drift_watch.py`) runs every 15 minutes with **no code path to the customer at all** —
+  (`engine/drift_watch.py`) runs every 15 minutes with no code path to the customer at all;
   both are cheap, reuse-not-rebuild fixes.
-- The clearest "aha" moment by design — seeing a full plan and AUD cost estimate before anything
-  touches Azure — is a genuine differentiator (ADR-0001) and worth protecting as the product grows.
+- The clearest "aha" moment by design (seeing a full plan and AUD cost estimate before anything
+  touches Azure) is a differentiator (ADR-0001) worth protecting as the product grows.
 - No customer interviews, support tickets, or usage analytics exist yet for this journey (the ADRs
   behind this map are dated August–September 2026 and read as pre-GA/design-partner stage).
   Confidence throughout is Low–Medium; treat this as a hypothesis-led first pass to validate against
   a real cohort, not a finished CX artefact.
+
+The sections below define the scope and actors, walk through each stage of the journey with evidence and metrics, and close with prioritised improvements.
 
 ## Scope and Scenario
 
@@ -56,15 +58,15 @@
 
 ## Persona and Job To Be Done
 
-- **Persona**: Tenant Approver — a platform administrator or delegated cloud engineer inside the customer organisation, acting with Entra-authenticated identity and an Approver/Requester app role.
+- **Persona**: Tenant Approver, a platform administrator or delegated cloud engineer inside the customer organisation, acting with Entra-authenticated identity and an Approver/Requester app role.
 - **Goals**: get a governed data platform running fast, without ceding control over what actually executes against the tenant.
 - **Motivations**: reduce manual provisioning cost and lead time; avoid configuration drift and inconsistent builds across environments.
 - **Constraints**: enterprise governance requirements (RBAC, approval trails, data residency); may need a second, distinct approver for higher-cost or higher-risk plans.
 - **Success definition**: an approved plan becomes a running platform inside an hour, with an auditable record of exactly what was approved and by whom.
 - **Job to be done**: make progress on standing up production data-platform infrastructure without hiring or queuing for a platform-engineering team, while staying inside the organisation's compliance and residency boundaries.
 - **Push** (status quo isn't working): manual provisioning is slow, inconsistent, and error-prone, driven by multiple approval hops and repetitive deployment work (`product-specification.md`, Problem statement).
-- **Pull** (attractive about Groundwork): a conversational request turns into a priced, validated plan in under a minute (spec NFR), and an approved plan becomes running infrastructure in under an hour — no hand-written Terraform/Bicep.
-- **Anxiety** (risk of switching): an AI agent is involved in a request that ends with changes to our production Azure tenant — will it do something nobody approved? Voice alone can authorise an irreversible action once a session is open (ADR-0011); in-call audio may be processed outside the data-residency region under per-tenant consent (PD-005).
+- **Pull** (attractive about Groundwork): a conversational request turns into a priced, validated plan in under a minute (spec NFR), and an approved plan becomes running infrastructure in under an hour, with no hand-written Terraform/Bicep.
+- **Anxiety** (risk of switching): an AI agent is involved in a request that ends with changes to our production Azure tenant. Will it do something nobody approved? Voice alone can authorise an irreversible action once a session is open (ADR-0011); in-call audio may be processed outside the data-residency region under per-tenant consent (PD-005).
 - **Habit** (attachment to current way): existing hand-built landing zones and an existing platform team relationship, which at least fail in ways the organisation already understands.
 
 ## Journey Map
@@ -79,9 +81,9 @@
 | **6. Completion & Handover** | Confirm success and understand what happens next | Outcome email (ACS Email via `NotificationDispatcher`) | Reads the completion email, including the explicit ownership-handover line | "Good, it worked. Who owns changes to this from here?" | Confident/relieved (+2) when notified; **unaware and exposed** if not | `notify_deployment_outcome` silently skips sending (only a log warning) if `CustomerTenant.notification_email` was never captured/confirmed | `notification_email` is gathered conversationally (FR-002/FR-004b) but isn't a hard precondition of approval — its absence fails silently, not loudly | Make `notification_email` a blocking precondition of approval, not an optional field that fails silently later | `src/groundwork_shared/notify/dispatcher.py` (High) | % of completed deployments with a recorded `notification_email` and a confirmed send |
 | **7. Ongoing Operation** | Trust that the platform stays healthy without having to babysit it | Periodic drift re-evaluation (`engine/drift_watch.py`, every 15 min); pull-based readiness report (`GET /v1/tenants/{id}/onboarding/readiness-report`) | Would need to actively pull the readiness report to learn about drift; otherwise finds out only if something visibly breaks | "Is anyone watching this, or do I have to keep checking?" | Neutral, mildly exposed (-1) | Drift is detected on a schedule but there is no code path from a drift verdict to the customer — only to a repository and internal metrics | `drift_watch.py` was built to "emit a signal without mutating customer state"; wiring that signal to the customer was out of scope when it shipped | Wire blocking drift verdicts into the existing `NotificationDispatcher` (reuse the email channel already built for FR-051; no new channel needed) | `src/groundwork_orchestrator/engine/drift_watch.py`, `api/readiness_reports.py` (High for the gap existing; Medium for customer-felt impact) | Mean time between a blocking drift verdict and the customer being notified (today: unbounded/never until they pull the report) |
 
-> **Loop note**: Stage 7 is where a request for additional capability, an upgrade, or an expansion would re-enter the journey at Stage 3 (Requesting & Planning) for a new plan — the spec's Phase 2/3 roadmap (multi-region, upgrades, AI-assisted scaling) extends this loop but isn't built yet, so it's recorded here as a future loop-back, not a shipped capability.
+> **Loop note**: Stage 7 is where a request for additional capability, an upgrade, or an expansion would re-enter the journey at Stage 3 (Requesting & Planning) for a new plan. The spec's Phase 2/3 roadmap (multi-region, upgrades, AI-assisted scaling) extends this loop but isn't built yet, so it's recorded here as a future loop-back, not a shipped capability.
 
-### Sub-map: Provisioning Failure Branch (materially different — scenario sweep)
+### Sub-map: Provisioning Failure Branch (materially different, scenario sweep)
 
 This branch diverges enough from the happy path (different actions, a different emotional trajectory, and a decision the customer has no real control over) that it is broken out here rather than folded into Stage 5 above, per the scenario-sweep rule.
 
@@ -91,7 +93,7 @@ This branch diverges enough from the happy path (different actions, a different 
 | 5b. Recovery decision | Get the deployment moving again or undo it | `POST /deployments/{id}/recovery` | Chooses `retry`, `forward_fix`, or attempts `rollback` | "I'll just roll it back, right?" | Frustrated → high-risk trust break on discovering `rollback` returns `501` (-3) | Rollback is offered as a named choice in the blueprint's `recovery_path` but isn't executable — every gate before it is real, only the execution is missing | Rollback execution needs its own design to reconcile with `denyDelete`; explicitly deferred as substantial, unscoped work (ADR-0005) | Don't let the customer discover this by calling the endpoint: disclose in the halt notification itself that rollback isn't available yet, and lead with `retry`/`forward_fix` as the real options | `docs/adr/0005-...` (High) | Count of halted deployments where the customer's first recovery attempt is a rollback that returns `501` |
 | 5c. Resume | Get back on the happy path | Requeue via `retry` or `forward_fix` | Confirms the chosen path | "Will this pick up where it left off, or start over?" | Recovering (0 to +1) | None evidenced beyond 5b | `requeue_after_recovery_choice` resumes from the last checkpoint, not from scratch | Say this explicitly in the recovery response so the customer isn't afraid of a full re-run | `docs/adr/0005-...` (High) | Resume success rate after `retry`/`forward_fix` |
 
-**Scenario sweep classification**: Primary happy path — in scope (main table above). Failure cascade / recovery path — in scope, represented as this separate sub-map. State-transition path (halted → resumed) — in scope, folded into 5c. Data-lag/incomplete-data path — out of scope for this pass; no evidence gathered on stale-data scenarios (e.g., a plan validated against a tenant state that changes before approval) — flagged as a gap in the Validation Plan.
+**Scenario sweep classification**: Primary happy path, in scope (main table above). Failure cascade / recovery path, in scope, represented as this separate sub-map. State-transition path (halted → resumed), in scope, folded into 5c. Data-lag/incomplete-data path, out of scope for this pass; no evidence gathered on stale-data scenarios (e.g., a plan validated against a tenant state that changes before approval), flagged as a gap in the Validation Plan.
 
 ## Critical Moments
 
@@ -115,7 +117,9 @@ Priority = (Customer Impact + Business Impact + Risk of Doing Nothing) × Confid
 | 4 | Drift detected but never pushed to the customer | 7. Ongoing Operation | M | M | L | M | M | 12 | Orchestrator — Near-term |
 | 5 | `AADSTS65001` token-acquisition gotcha at onboarding | 2. Onboarding | M | M | M | H | M | 9 | DevEx — Near-term |
 
-Rollback execution itself (the underlying capability, not the messaging gap above) is not scored here as a pain point — it is high-effort, dependency-laden engineering work (denyDelete reconciliation) rather than a fix ranked against the others. It is carried below as a Strategic Investment.
+Rollback execution itself (the underlying capability, not the messaging gap above) is not scored here as a pain point. It is high-effort, dependency-laden engineering work (denyDelete reconciliation) rather than a fix ranked against the others. It is carried below as a Strategic Investment.
+
+The next section translates these pain points into concrete recommendations, grouped by effort level.
 
 ## Recommended Improvements
 
@@ -185,4 +189,4 @@ Rollback execution itself (the underlying capability, not the messaging gap abov
 - Swimlanes: Customer actions, Emotion curve, Pain points/Opportunities, Channel (voice / chat / REST / CLI).
 - Emotion curve: mostly flat-to-positive, with two sharp dips at Onboarding (token gotcha) and Approval (step-up 403), and the deepest dip of the whole map in the failure branch at the rollback-501 discovery.
 - Colour/tagging: tag each Opportunity Quick win / Near-term / Strategic / Validate with a consistent colour so the roadmap view can be lifted straight from the Recommended Improvements tables.
-- Workshop notes: bring in whoever wrote `first-tenant-walkthrough.md` and ADR-0005/ADR-0011 — they are the closest thing this map currently has to direct customer-facing evidence, and can confirm or correct the inferred emotion scores before this goes further.
+- Workshop notes: bring in whoever wrote `first-tenant-walkthrough.md` and ADR-0005/ADR-0011. They are the closest thing this map currently has to direct customer-facing evidence, and can confirm or correct the inferred emotion scores before this goes further.

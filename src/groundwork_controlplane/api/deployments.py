@@ -169,7 +169,7 @@ async def queue_deployment_for_approval(
     :class:`AuthorityChain`. The deterministic-execution boundary requires orchestration to have
     one real entry point, not a second, looser one a different channel invented independently.
     """
-    deployment_repository = request.app.state.deployment_repository
+    deployment_repository: DeploymentRepository = request.app.state.deployment_repository
     tenant = await get_customer_tenant(request, caller.tenant_id)
 
     already_used = await _find_deployment_for_approval(

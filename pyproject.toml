@@ -215,6 +215,13 @@ no_implicit_reexport = true
 module = "groundwork_contracts.*"
 strict = true
 
+[[tool.mypy.overrides]]
+# agent_framework_foundry ships no py.typed marker and no stub package, so mypy cannot analyze
+# it at all — this is a property of the third-party package, not something a per-call-site
+# ignore or code change on our side can fix. Scoped to this one module, not a blanket ignore.
+module = "agent_framework_foundry"
+ignore_missing_imports = true
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------

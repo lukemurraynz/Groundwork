@@ -98,6 +98,7 @@ from groundwork_controlplane.approval.lookup import find_approval_by_plan_hash
 from groundwork_controlplane.approval.plan_identity import seal_plan
 from groundwork_controlplane.approval.service import record_approval
 from groundwork_controlplane.costing.licensing import licensing_disclosure_for
+from groundwork_orchestrator.state.repositories import ConversationRepository
 from groundwork_shared.telemetry.scrubbing import scrub_text
 
 _VOICE_BLUEPRINT_ID = "standard-production-fabric"
@@ -409,6 +410,35 @@ _LIST_TENANTS_TOOL_VOICE_LIVE = {"type": "function", **_LIST_TENANTS_TOOL_CORE}
 # calls the native client too (with auto function-invocation disabled — see
 # groundwork_controlplane.agents.providers.foundry_openai), it shares the flat shape above with
 # the WS relay: one set of tool schemas for both surfaces, not two that could drift apart.
+
+# Single source of truth for "every tool this voice channel offers" — the WS session.update,
+# the /chat tools list, and the WS function-call tracking set below all read from this one list,
+# so a tool present in one path can never again silently drift out of another.
+#
+# Found live 2026-09-13: the WS relay's conversation.item.created handler (below) used to carry
+# its own separately hand-maintained set of 7 tool names to decide which function calls to
+# track through the three-phase flow. It had fallen three tools behind this list — quick_onboard,
+# get_offshore_inference_disclosure, and list_tenants (four, including record_offshore_inference_
+# consent) were advertised to the model here but never tracked there, so a call to any of them
+# was silently dropped: no function_call_output was ever sent back, the model just hung on that
+# call, and the underlying action (recording FR-053d consent, for one) never happened. The /chat
+# dispatcher a few hundred lines down handled all eleven correctly the whole time, which is why
+# this only ever showed up on the realtime voice path. Deriving the tracking set from this same
+# list, instead of hand-listing names a second time, makes that drift structurally impossible.
+_ALL_VOICE_TOOLS: list[dict[str, Any]] = [
+    _GENERATE_PLAN_TOOL_VOICE_LIVE,
+    _GET_ONBOARDING_STATUS_TOOL_VOICE_LIVE,
+    _CREATE_TENANT_TOOL_VOICE_LIVE,
+    _CONFIRM_CUSTOMER_CONSENT_TOOL_VOICE_LIVE,
+    _GRANT_ADO_ORG_ACCESS_TOOL_VOICE_LIVE,
+    _CHECK_PLAN_STATUS_TOOL_VOICE_LIVE,
+    _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_VOICE_LIVE,
+    _QUICK_ONBOARD_TOOL_VOICE_LIVE,
+    _GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_VOICE_LIVE,
+    _RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_VOICE_LIVE,
+    _LIST_TENANTS_TOOL_VOICE_LIVE,
+]
+_VOICE_TOOL_NAMES: frozenset[str] = frozenset(tool["name"] for tool in _ALL_VOICE_TOOLS)
 
 
 def _normalise_subscription_id(raw: str) -> str:
@@ -1039,19 +1069,7 @@ async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
                 "input_audio_echo_cancellation": {"type": "server_echo_cancellation"},
                 "turn_detection": {"type": "azure_semantic_vad"},
                 "input_audio_transcription": {"model": "azure-speech", "language": "en-AU"},
-                "tools": [
-                    _GENERATE_PLAN_TOOL_VOICE_LIVE,
-                    _GET_ONBOARDING_STATUS_TOOL_VOICE_LIVE,
-                    _CREATE_TENANT_TOOL_VOICE_LIVE,
-                    _CONFIRM_CUSTOMER_CONSENT_TOOL_VOICE_LIVE,
-                    _GRANT_ADO_ORG_ACCESS_TOOL_VOICE_LIVE,
-                    _CHECK_PLAN_STATUS_TOOL_VOICE_LIVE,
-                    _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_VOICE_LIVE,
-                    _QUICK_ONBOARD_TOOL_VOICE_LIVE,
-                    _GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_VOICE_LIVE,
-                    _RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_VOICE_LIVE,
-                    _LIST_TENANTS_TOOL_VOICE_LIVE,
-                ],
+                "tools": _ALL_VOICE_TOOLS,
                 "tool_choice": "auto",
                 "temperature": config.temperature,
             },
@@ -1312,15 +1330,7 @@ async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
                     name = item.get("name")
                     call_id = item.get("call_id")
                     previous_item_id = item.get("id")
-                    if name in {
-                        "generate_plan",
-                        "get_onboarding_status",
-                        "create_tenant",
-                        "confirm_customer_consent",
-                        "grant_ado_org_access",
-                        "check_plan_status",
-                        "trigger_bootstrap_identity",
-                    } and isinstance(call_id, str):
+                    if name in _VOICE_TOOL_NAMES and isinstance(call_id, str):
                         pending_call = {
                             "name": name,
                             "call_id": call_id,
@@ -1730,7 +1740,7 @@ async def _save_conversation(
     """
     from azure.cosmos.exceptions import CosmosHttpResponseError
 
-    repository = conn.app.state.conversation_repository
+    repository: ConversationRepository = conn.app.state.conversation_repository
     if not existed:
         return await repository.create(record.tenant_id, record)
 
@@ -1904,19 +1914,7 @@ async def voice_chat(
     # Same tool set the WS relay uses — the flat Voice Live shape works unchanged against the
     # native client's /responses route too (verified live 2026-09-06), so there is exactly one
     # set of tool schemas for both surfaces, not two that could drift apart.
-    tools = [
-        _GENERATE_PLAN_TOOL_VOICE_LIVE,
-        _GET_ONBOARDING_STATUS_TOOL_VOICE_LIVE,
-        _CREATE_TENANT_TOOL_VOICE_LIVE,
-        _CONFIRM_CUSTOMER_CONSENT_TOOL_VOICE_LIVE,
-        _GRANT_ADO_ORG_ACCESS_TOOL_VOICE_LIVE,
-        _CHECK_PLAN_STATUS_TOOL_VOICE_LIVE,
-        _TRIGGER_BOOTSTRAP_IDENTITY_TOOL_VOICE_LIVE,
-        _QUICK_ONBOARD_TOOL_VOICE_LIVE,
-        _GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_VOICE_LIVE,
-        _RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_VOICE_LIVE,
-        _LIST_TENANTS_TOOL_VOICE_LIVE,
-    ]
+    tools = _ALL_VOICE_TOOLS
 
     messages = _conversation_messages(conversation)
     af_messages = [Message(role=m["role"], contents=[m["content"]]) for m in messages]

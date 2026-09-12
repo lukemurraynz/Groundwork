@@ -89,6 +89,7 @@ from groundwork_orchestrator.stages.infrastructure import (
     deployment_resource_group_name,
 )
 from groundwork_orchestrator.stages.pipeline_execution import AZURE_DEVOPS_RESOURCE_ID
+from groundwork_orchestrator.state.repositories import CustomerTenantRepository
 from groundwork_shared.notify.dispatcher import NotificationDispatchError, build_email_sender
 from groundwork_shared.telemetry.scrubbing import scrub_text
 from groundwork_shared.validation.checks.devops import probe_organization_status
@@ -284,7 +285,7 @@ async def create_customer_tenant_record(
         concurrency_cap=body.concurrency_cap,
     )
 
-    tenant_repository = request.app.state.tenant_repository
+    tenant_repository: CustomerTenantRepository = request.app.state.tenant_repository
     try:
         return await tenant_repository.create(body.tenant_id, tenant)
     except CosmosResourceExistsError as exc:
@@ -302,7 +303,7 @@ async def confirm_customer_consent_attestation(
 ) -> CustomerTenant:
     caller.require_role(CallerRole.OPERATOR)
 
-    tenant_repository = request.app.state.tenant_repository
+    tenant_repository: CustomerTenantRepository = request.app.state.tenant_repository
     tenant = await tenant_repository.read(tenant_id, tenant_id)
     if tenant is None:
         raise HTTPException(status_code=404, detail="tenant not found")
@@ -351,7 +352,7 @@ async def attach_offshore_inference_consent(
     :func:`create_customer_tenant_record` runs. The caller is expected to disposition ``None``
     itself; it is not necessarily a defect at the call site.
     """
-    tenant_repository = request.app.state.tenant_repository
+    tenant_repository: CustomerTenantRepository = request.app.state.tenant_repository
     tenant = await tenant_repository.read(tenant_id, tenant_id)
     if tenant is None:
         return None
@@ -372,7 +373,7 @@ async def record_subscription_entitlement(
 ) -> CustomerTenant:
     caller.require_role(CallerRole.OPERATOR)
 
-    tenant_repository = request.app.state.tenant_repository
+    tenant_repository: CustomerTenantRepository = request.app.state.tenant_repository
     tenant = await tenant_repository.read(tenant_id, tenant_id)
     if tenant is None:
         raise HTTPException(status_code=404, detail="tenant not found")
@@ -411,7 +412,7 @@ async def confirm_customer_ado_org_access_attestation(
 ) -> CustomerTenant:
     caller.require_role(CallerRole.OPERATOR)
 
-    tenant_repository = request.app.state.tenant_repository
+    tenant_repository: CustomerTenantRepository = request.app.state.tenant_repository
     tenant = await tenant_repository.read(tenant_id, tenant_id)
     if tenant is None:
         raise HTTPException(status_code=404, detail="tenant not found")
@@ -599,7 +600,7 @@ async def bootstrap_subscription_identity(
 ) -> CustomerTenant:
     caller.require_role(CallerRole.OPERATOR)
 
-    tenant_repository = request.app.state.tenant_repository
+    tenant_repository: CustomerTenantRepository = request.app.state.tenant_repository
     tenant = await tenant_repository.read(tenant_id, tenant_id)
     if tenant is None:
         raise HTTPException(status_code=404, detail="tenant not found")
@@ -1295,7 +1296,7 @@ async def record_tenant_notification_email(
     """
     caller.require_role(CallerRole.OPERATOR)
 
-    tenant_repository = request.app.state.tenant_repository
+    tenant_repository: CustomerTenantRepository = request.app.state.tenant_repository
     tenant = await tenant_repository.read(tenant_id, tenant_id)
     if tenant is None:
         raise HTTPException(

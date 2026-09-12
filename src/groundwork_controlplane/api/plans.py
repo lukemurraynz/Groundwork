@@ -30,7 +30,7 @@ from groundwork_controlplane.approval.plan_identity import seal_plan
 from groundwork_controlplane.costing.licensing import licensing_disclosure_for
 from groundwork_controlplane.validation.engine import ReadinessEngine
 from groundwork_controlplane.validation.registry import build_validation_context
-from groundwork_orchestrator.state.repositories import PlanRepository
+from groundwork_orchestrator.state.repositories import CustomerTenantRepository, PlanRepository
 
 router = APIRouter(prefix="/v1", tags=["plans"])
 
@@ -74,7 +74,8 @@ def get_readiness_engine(blueprint_id: str, request: Request | WebSocket) -> Rea
 
 
 def get_plan_repository(request: Request) -> PlanRepository:
-    return request.app.state.plan_repository
+    repository: PlanRepository = request.app.state.plan_repository
+    return repository
 
 
 def get_blueprint(blueprint_id: str, request: Request | WebSocket) -> PlatformBlueprint:
@@ -89,7 +90,7 @@ def get_blueprint(blueprint_id: str, request: Request | WebSocket) -> PlatformBl
 
 
 async def get_customer_tenant(request: Request | WebSocket, tenant_id: str) -> CustomerTenant:
-    repository = request.app.state.tenant_repository
+    repository: CustomerTenantRepository = request.app.state.tenant_repository
     tenant = await repository.read(tenant_id, tenant_id)
     if tenant is None:
         # No onboarding record exists for this tenant yet. Structurally identical to "not

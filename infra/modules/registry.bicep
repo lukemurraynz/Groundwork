@@ -13,7 +13,9 @@
 // control-plane identity's own AcrPull grant did nothing — caught via a live 401 Unauthorized on
 // `azd deploy`, not by any offline check.) azd itself pushes via the developer's own Entra identity.
 //
-// API version 2023-07-01 is the newest the Bicep CLI can type-check.
+// API version 2025-11-01: the newest stable (non-preview) version as of 2026-09-12
+// (`az provider show --namespace Microsoft.ContainerRegistry`), needed for
+// `networkRuleBypassAllowedForTasks` below - not present at 2023-07-01.
 
 @description('Azure region.')
 param location string
@@ -27,7 +29,7 @@ param resourceToken string
 @description('Tags applied to every resource.')
 param tags object
 
-@description('Registry SKU. Basic is sufficient for a development environment; Premium is required for private endpoints and geo-replication.')
+@description('Registry SKU. Basic is sufficient for a development environment; Premium is required for private endpoints, geo-replication, and the IP firewall below.')
 @allowed([
   'Basic'
   'Standard'
@@ -35,7 +37,28 @@ param tags object
 ])
 param sku string = 'Basic'
 
-resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+// IP firewall (`networkRuleSet`), not Network Security Perimeter: verified against Microsoft
+// Learn 2026-09-12, ACR has no NSP resource-association support at all, GA or preview (unlike
+// Key Vault/Storage/Cosmos/Foundry/Speech — see network-security-perimeter.bicep). This is the
+// only network control available to a registry short of a full Private Link + AKS VNet migration,
+// and it requires Premium — Basic/Standard silently ignore `networkRuleSet`.
+@description('Restrict the registry to allowedIpRanges instead of the open internet default. Requires sku to be Premium.')
+param restrictPublicAccess bool = false
+
+@description('IP address/CIDR ranges allowed through the firewall when restrictPublicAccess is true. Ignored otherwise.')
+param allowedIpRanges array = []
+
+// For-expressions can only be the direct value of a resource/module/variable/output declaration
+// (BCP138), not nested inside a conditional expression - hence the separate variable rather than
+// building this array inline inside the networkRuleSet ternary below.
+var ipAllowRules = [
+  for ip in allowedIpRanges: {
+    action: 'Allow'
+    value: ip
+  }
+]
+
+resource registry 'Microsoft.ContainerRegistry/registries@2025-11-01' = {
   name: 'crgw${resourceToken}'
   location: location
   tags: tags
@@ -46,6 +69,20 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
     // No admin account. See the module header — this is a secretless-identity requirement, not a preference.
     adminUserEnabled: false
     publicNetworkAccess: 'Enabled'
+    networkRuleSet: restrictPublicAccess
+      ? {
+          defaultAction: 'Deny'
+          ipRules: ipAllowRules
+        }
+      : null
+    // Verified live 2026-09-12: `azd deploy`'s remote build (ACR Tasks, azure.yaml's
+    // `remoteBuild: true`) is itself subject to the same firewall and gets denied with
+    // `restrictPublicAccess` on - the build agent's IP is neither the operator's own nor AKS's
+    // outbound IP. Tasks stopped being an implicit trusted service from 2025-06-01; this opts
+    // back in explicitly for tasks running as the registry's own system-assigned identity, the
+    // same "AzureServices" bypass shape keyvault.bicep already uses, rather than trying to
+    // allowlist ACR Tasks' own build-agent IP range (real, but a moving target requiring upkeep).
+    networkRuleBypassAllowedForTasks: restrictPublicAccess
     policies: {
       // Untagged manifests accumulate and become an unreviewed supply-chain surface. Retention is
       // a Premium feature, so it is conditional rather than assumed.

@@ -242,3 +242,4 @@ resource operatorDataAccess 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssign
 output endpoint string = account.properties.documentEndpoint
 output accountName string = account.name
 output databaseName string = databaseName
+output resourceId string = account.id

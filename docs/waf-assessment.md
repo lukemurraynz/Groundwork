@@ -60,10 +60,14 @@ are never re-run; `GET`-before-write idempotence is enforced across all blueprin
 (AGENT_HANDOFF §1). Verified live 2026-08-25 when rolling pod updates orphaned two in-flight runs
 that auto-recovered.
 
-**Remaining gap**: stage-level bounded timeouts do not exist. A future novel exception inside
-`Sequencer.run` (outside `_run_one_stage`'s guard) could still orphan a deployment until the
-lease expires naturally. AGENT_HANDOFF §4 bug #6 is structurally closed for the known case but
-the general pattern is unresolved. **Owner**: engineer
+**Resolved 2026-09-12**: `BlueprintStage.timeout_seconds` (`groundwork_contracts/blueprint.py`,
+default 1800s) and `Sequencer._run_one_stage` wraps `stage.execute()` in `asyncio.wait_for`.
+A raised exception was already caught; the actual gap was a hang (a call that never returns),
+which no try/except touches — only a wall-clock bound does. A timeout is classified transient, so
+it requeues within the stage's normal retry budget exactly like any other transient failure,
+rather than sitting `EXECUTING` until the subscription lease expires naturally.
+`tests/unit/test_sequencer.py::test_a_stage_that_hangs_times_out_and_requeues` covers it with a
+1-second override so the test doesn't itself wait out a real timeout. **Owner**: n/a (resolved)
 
 ---
 
@@ -82,11 +86,22 @@ documented (`docs/runbook.md` §8). No silent discard of billable resources.
 `aks.bicep` sets `maxSurge: '1'` on user node pools (lines 181, 200) and `upgradeChannel: 'patch'`
 for auto-upgrade (line 219). Minor Kubernetes upgrades are reviewed changes, not drift.
 
-**Gap**: a `azd deploy` while a deployment is executing kills its pod. This is documented as
-expected behaviour (`docs/runbook.md` §10) but there is no pre-deploy check that drains or
-quarantines in-flight work first. Auto-recovery handles it, but it adds unnecessary disruption.
+**Gap, resolved to a warning 2026-09-12**: a `azd deploy` while a deployment is executing kills its
+pod. This is documented as expected behaviour (`docs/runbook.md` §10) and stays that way — tracing
+`queue_loop.py::_attempt_deployment`'s own `finally` block confirmed the subscription lease is
+already released promptly on cancellation (not held until TTL expiry, correcting an earlier
+assumption in this document), so recovery is fast, not the "wait up to an hour" framing this entry
+originally implied. What was actually missing was visibility, not correctness: no pre-deploy check
+told the operator a deployment was in flight before restarting its pod. Added a `predeploy` azd
+hook (`scripts/predeploy.ps1`/`.sh` → `scripts/check_in_flight_deployments.py`) that lists any
+currently-`executing` deployments and warns — advisory only, always exits 0, never blocks a
+legitimate deploy. Verified live against `groundwork-dev`'s real Cosmos account. Reuses the one
+sanctioned cross-tenant enumeration path (`TenantRegistry` + a per-tenant query, the same pair
+`queue_loop.py`'s own `poll_once` uses) rather than a new cross-partition query against
+`deployments`, respecting FR-032 tenant isolation exactly as that container's own docstring
+requires.
 
-**Owner**: engineer
+**Owner**: n/a (resolved)
 
 ---
 
@@ -164,7 +179,16 @@ a session that presented MFA once still passes for its full token lifetime.
 now closes it for any deployment that doesn't deliberately opt out**; see
 ADR-0011's own 2026-09-06 correction for the full account.
 
-**Owner**: product-owner (requires design decision before any code change)
+**Update 2026-09-12**: the product-owner decision this entry asked for is made. `voice.html`'s
+`maybeVoiceApprove()` no longer deploys on the first approve-like utterance — it reads back the
+concrete plan (blueprint, region, cost) and requires an explicit second "confirm" inside a 45s
+window before calling `/approve`, mirroring the existing licence-acknowledgement two-step. This
+is a client-side UX gate against an accidental/ambient trigger on an already-open session, not
+continuous identity re-verification — the underlying token-evidence gate (step-up auth) is
+unchanged, and a hostile client could still skip the confirmation and call `/approve` directly
+with one utterance, same as before. Severity stays High for that reason.
+
+**Owner**: product-owner (design decision made 2026-09-12; continuous re-verification, if wanted, is still open)
 
 ---
 
@@ -224,14 +248,18 @@ impossible, not a convention. `tests/integration/test_report_immutability.py` co
 
 ---
 
-### 2.9 Voice consent REST-twin gap (xfail) [Medium]
+### 2.9 Voice consent REST-twin gap [Resolved]
 
-`tests/security/test_voice_consent_gate.py` exists but the voice consent REST twin (a non-voice
-path to record the same consent) is not fully exercised under the same gate. The xfail marker
-records an acknowledged gap. `channels/voice/consent.py` writes consent artefacts to the immutable
-container but the REST path parity is incomplete.
+**Resolved, confirmed 2026-09-12.** No `xfail` marker exists anywhere in `tests/security/` or
+`tests/accessibility/` — this entry was stale. `POST /v1/tenants/offshore-inference-consent` is a
+real, tested REST twin of the voice consent path: `tests/accessibility/test_channel_parity.py`'s
+`VOICE_MUTATION_PARITY` table has a `"voice offshore inference consent"` case asserting both routes
+are registered and share "the same consent artefact store and disclosure-version contract as the
+voice route." Ran `test_every_voice_mutation_has_non_voice_rest_twin[voice offshore inference
+consent]` directly — passes. No further action needed; left in this document as a record that the
+gap was checked, not silently dropped.
 
-**Owner**: engineer
+**Owner**: n/a (resolved)
 
 ---
 
@@ -267,6 +295,77 @@ Groundwork's own control plane and orchestrator.
 **Gap**: a leaked credential or an over-broad RBAC assignment is reachable from the public
 internet, not contained behind a VNet boundary. This section was absent from earlier versions of
 this assessment despite the rest of §2 being self-critical — added 2026-09-08.
+
+**Update 2026-09-12**: investigated classic private endpoints first — blocked. AKS
+(`infra/modules/aks.bicep`) has no bring-your-own VNet, and `vnetSubnetID` is a creation-time-only
+AKS setting (confirmed against the `az aks` CLI reference), so adding private endpoints the way
+the customer blueprint does would force recreating every already-provisioned AKS cluster,
+including `groundwork-dev`. Used Network Security Perimeter instead — it needs no VNet.
+
+Shipped, behind `enableNetworkHardening` (default `false`, so existing environments are
+unaffected until an operator opts in — `infra/modules/network-security-perimeter.bicep`):
+- Key Vault, Storage, Cosmos, and Foundry are associated to an NSP profile in `Learning`
+  mode (observes and logs, doesn't block) with a subscription-scoped inbound access rule. Cosmos
+  is included despite NSP support being public-preview, not GA, for that service — a deliberate
+  call given it holds tenant/approval data, not an oversight.
+- **Speech was in the original design and removed after a live deployment failure (2026-09-12).**
+  NSP support for `Microsoft.CognitiveServices/accounts` turns out to be per-`kind`, not
+  per-resource-type: Foundry's account is `kind: AIServices` (NSP-supported), Speech's is `kind:
+  SpeechServices`, which ARM rejects outright ("doesn't support Network Security Perimeter").
+  Confirmed via `az cognitiveservices account show --query kind` against both live accounts.
+  Speech stays on its existing Entra-RBAC-only posture; there is currently no network-layer control
+  available for it short of Private Link (which reopens the AKS-VNet problem this whole approach
+  was chosen to avoid).
+- Container Registry has **no NSP support at all** (verified 2026-09-12) and stays on its own
+  control: `infra/modules/registry.bicep` gets a Premium-SKU IP-firewall (`networkRuleSet`) when
+  hardening is enabled, allowlisting the AKS cluster's own deterministic outbound IP
+  (`infra/modules/outbound-ip.bicep`, a small standalone module so the IP address is known without
+  a circular dependency between the registry and AKS modules) plus any operator-supplied
+  `acrAllowedIpRanges` (needed for `azd deploy`'s image push from wherever the operator runs it —
+  no default, since guessing wrong just breaks the push with a clear 403, not silently).
+
+**Verified live against `groundwork-dev` (2026-09-12)**: `enableNetworkHardening=true` applied
+cleanly — NSP with 4 associations (Cosmos, Foundry, Key Vault, Storage) all in `Learning` mode; ACR
+on Premium with `defaultAction: Deny` and both the AKS outbound IP and the operator's IP allowed.
+App stayed healthy throughout (`/health/ready` continued reporting Cosmos and Key Vault reachable),
+and a forced `kubectl rollout restart` confirmed fresh image pulls still succeed through the
+firewalled ACR — the AKS-outbound-IP allowlist genuinely works, not just compiles.
+
+**Still open**: the four NSP associations ship in `Learning` mode, not `Enforced` — nothing is
+actually blocked yet. Flipping to `Enforced` is a follow-up once an operator has reviewed the NSP
+diagnostic logs for a representative period (tracked in `docs/release-checklist.md`). ACR's own
+push path (from wherever `azd deploy` runs) has no equivalent hardening beyond the IP allowlist;
+Entra RBAC — already the existing control, no admin user — is what protects it. Speech has no
+network-layer control at all yet, per above. The AKS cluster's own public ingress (voice.html/the
+API) is untouched by any of this and stays public by design; see `docs/teams-channel-scoping.md`
+for why that's true of a future Teams channel too.
+
+**New gap found while re-verifying, 2026-09-12: `enableNetworkHardening=true` breaks `azd
+deploy`'s remote build.** `azure.yaml`'s `docker.remoteBuild: true` builds each image via ACR
+Tasks; that build agent's own IP is neither the operator's IP nor AKS's outbound IP, so
+`ipRules`+`defaultAction: Deny` denies its `docker login` outright — found live, not
+theoretically, when a routine `azd deploy` failed mid-session. Tried the documented fix
+(`networkRuleBypassAllowedForTasks: true`, added to `registry.bicep`) first: it did not resolve
+this specific failure — that property covers a narrower internal task-identity path, not a build
+agent's direct data-plane connection to the registry. Reverted `enableNetworkHardening` to `false`
+on `groundwork-dev` to unblock deploys; it stays off pending a real decision on this trade-off.
+**Also found in the process**: downgrading ACR's SKU back down while it still has IP rules or a
+retention policy fails outright (`SkuUpdateConflict`) — those have to be cleared in a separate,
+prior update before the SKU change lands, which `azd provision`'s one-shot desired-state model
+doesn't sequence for you. Toggling hardening off is not simply re-running `azd provision` with the
+flag flipped; it needs `az acr update --default-action Allow` + removing each IP rule + disabling the retention
+policy first, then `azd provision` to actually apply the SKU downgrade.
+
+The two real options for actually keeping hardening on: (a) an ACR **dedicated agent pool** in a
+VNet (`az acr agentpool create`) so builds run with private connectivity and never touch the
+public firewall at all — the clean fix, but needs a VNet, which nothing in Groundwork's own infra
+has today; or (b) allowlist the `AzureContainerRegistry` service tag's actual IP ranges for the
+deployment region — real, but ACR's `ipRules` only accepts literal IPs/CIDRs, not the service tag
+itself, so this means downloading Azure's published IP ranges and maintaining the list as they
+change. Neither is a quick follow-up; recorded here rather than solved, so it doesn't get
+rediscovered as a surprise the next time hardening is turned on.
+
+**Owner**: product-owner (VNet-vs-IP-list is an architecture decision, not an engineering default)
 
 **Owner**: product-owner
 
@@ -320,10 +419,22 @@ and `accessibility/`. Prompt-injection corpus (`tests/security/test_prompt_injec
 runs attacker payloads through the real planning agent. Import-boundary enforcement is a separate
 gate in the release checklist.
 
-**Gap**: T030 (plan-readonly live integration test against a real deployed environment) is open;
-tests currently run against mocked Azure surfaces for the live-round-trip cases. T059-T064
-(dedicated idempotence/resilience/isolation/concurrency suites) exist as files but were written
-without a real Azure target.
+**Resolved 2026-09-12**: `tests/live/test_plan_readonly_live.py` runs the real `ReadinessEngine`
+against real Azure — every check in `CHECKS` (naming, network, identity, tenant, quota, policy,
+devops, fabric) makes a genuine ARM/Graph/DevOps call, read-only by construction (a readiness
+check reports a verdict, none of them write). Registered under the `requires_azure` marker that
+already existed in `pyproject.toml` but had no test using it; skipped by default, opt in with
+`GROUNDWORK_LIVE_TEST_SUBSCRIPTION_ID` set to a disposable subscription — never a real customer
+one, same convention `docs/release-checklist.md` §9 already states for
+`tests/idempotence`/`tests/resilience`. Ran it for real against the Groundwork platform's own
+`groundwork-dev` deployment: 1 passed in ~20s, every assertion in the real
+`standard-production-fabric` contract produced a genuine result, not all `UNREACHABLE` (which the
+test explicitly checks for and would fail on — that pattern is the signature of a broken
+credential or a check that never actually reached Azure, not a real environment being unready).
+
+T059-T064 (dedicated idempotence/resilience/isolation/concurrency suites) remain open — they exist
+as files but were written without a real Azure target, and this session only wrote the one
+plan-readonly test T030 specifically named, not the broader live-suite backlog.
 
 ---
 

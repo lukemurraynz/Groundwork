@@ -23,6 +23,13 @@ exists to make structural:
    T072's real classification exists) rather than letting it propagate uncaught and leave the
    deployment stuck ``EXECUTING`` with no record of why — the same reasoning as
    ``ReadinessEngine`` turning a raised check into ``UNREACHABLE`` instead of an unhandled crash.
+5. **A stage that hangs is bounded, not just one that raises (waf-assessment.md §1.2).** A caught
+   exception and an indefinite hang are different failure modes — the try/except above does
+   nothing for a call that simply never returns. ``_run_one_stage`` wraps ``stage.execute()`` in
+   ``asyncio.wait_for`` using the blueprint's own ``BlueprintStage.timeout_seconds`` (default
+   1800s), converting a timeout into the same transient ``FAILED`` outcome path a raised
+   transient exception already takes, rather than orphaning the deployment until its subscription
+   lease expires naturally.
 
 **Retry (T072, FR-030) and halt reconstruction (T073, FR-031) are both now live.** A transient
 failure, or one whose blueprint-declared minimum retry interval has not yet elapsed, requeues the
@@ -41,6 +48,7 @@ queue-consumption loop, still to be added to ``groundwork_orchestrator.worker``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Callable
@@ -623,9 +631,28 @@ class Sequencer:
             retention_expires_at=self._retention_deadline(started_at),
         )
 
+        stage_meta = next(s for s in self._blueprint.stages if s.name == stage_name)
+        timeout_seconds = stage_meta.timeout_seconds
         try:
             outcome = await self._audit_repository.record_before(
-                deployment.tenant_id, audit_record, lambda: stage.execute(context)
+                deployment.tenant_id,
+                audit_record,
+                lambda: asyncio.wait_for(stage.execute(context), timeout=timeout_seconds),
+            )
+        except TimeoutError:
+            # A hang is a different failure mode from a raise — nothing above catches a call that
+            # simply never returns. Classified transient: the same retry budget and requeue path
+            # a raised transient exception already takes, since a hang is at least as likely to be
+            # a slow dependency as a genuine defect (module docstring point 5).
+            outcome = StageOutcome(
+                status=StageStatus.FAILED,
+                error=StageError(
+                    code="StageTimeout",
+                    message=(
+                        f"stage {stage_name!r} exceeded its {stage_meta.timeout_seconds}s bound"
+                    ),
+                    is_transient=True,
+                ),
             )
         except Exception as exc:
             # A stage that raises (a network error, an unexpected API response, an auth failure)

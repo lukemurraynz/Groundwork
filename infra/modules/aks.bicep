@@ -49,6 +49,22 @@ param operatorPrincipalId string = ''
 @description('Name of the container registry nodes pull images from.')
 param containerRegistryName string
 
+@description('Resource ID of a pre-created Standard static public IP to use for cluster outbound traffic instead of an AKS-managed one. Empty means AKS picks its own (address unknowable at template-author time). Only needed when the registry firewall (registry.bicep) must allowlist a fixed, known IP for kubelet image pulls.')
+param outboundPublicIpId string = ''
+
+// docs/waf-assessment.md §5.5: cost floor from three always-on node pools. Spot pricing is
+// deliberately scoped to control-plane only, never executor or system — see this param's own
+// description for why, and k8s/controlplane/deployment.tmpl.yaml for the matching toleration +
+// soft on-demand preference that keeps the fixed replica count off spot in steady state.
+@description('Adds a fourth, optional node pool for the control-plane tier at Spot pricing, scaling from 0 - burst/cost-optimisation capacity only, never a replacement for the on-demand controlplane pool. Off by default. Deliberately not offered for the executor pool: a stage timeout is classified transient and consumes the blueprint\'s retry budget (2-3 attempts) the same as any other transient failure, and Spot\'s ~30s eviction notice would raise how often that budget gets spent on evictions rather than genuine failures - a reliability regression for real customer deployments, not just a cost tradeoff. Not offered for the system pool either: cluster-critical add-ons need the same reliability floor AKS itself recommends against Spot for.')
+param enableSpotControlPlanePool bool = false
+
+@description('Minimum node count for the optional Spot control-plane pool. 0 is valid for a User-mode pool and is the point of offering this at all - true scale-to-zero when no burst capacity is needed.')
+param spotControlPlanePoolMinCount int = 0
+
+@description('Maximum node count for the optional Spot control-plane pool.')
+param spotControlPlanePoolMaxCount int = 3
+
 // Node sizing is parameterised because it is quota- and cost-bound, not design-bound. The *shape*
 // — three separate pools — is design-bound and identical in every profile, because FR-045c requires
 // that executor load cannot starve the planning surface. Collapsing the pools would save more money
@@ -211,6 +227,17 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2024-10-01' = {
       outboundType: 'loadBalancer'
       serviceCidr: '10.100.0.0/16'
       dnsServiceIP: '10.100.0.10'
+      loadBalancerProfile: !empty(outboundPublicIpId)
+        ? {
+            outboundIPs: {
+              publicIPs: [
+                {
+                  id: outboundPublicIpId
+                }
+              ]
+            }
+          }
+        : null
     }
 
     autoUpgradeProfile: {
@@ -242,6 +269,47 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2024-10-01' = {
       'skip-nodes-with-system-pods': 'true'
       'max-graceful-termination-sec': '600'
     }
+  }
+}
+
+// A genuinely new pool, not part of `cluster.properties.agentPoolProfiles` above — verified live
+// 2026-09-12: ARM rejects adding a pool to that array on an *existing* cluster outright
+// ("Adding agent pools to an existing cluster is not allowed through managed cluster operations
+// ... use per agent pool operations"), even though the same array works fine for pools present at
+// cluster creation. The dedicated `agentPools` child resource type is the sanctioned way to add
+// one afterward, and works identically whether the cluster is new or already running.
+resource spotControlPlanePool 'Microsoft.ContainerService/managedClusters/agentPools@2024-10-01' = if (enableSpotControlPlanePool) {
+  parent: cluster
+  name: 'spotcp'
+  properties: {
+    mode: 'User'
+    count: spotControlPlanePoolMinCount
+    vmSize: nodeVmSize
+    osType: 'Linux'
+    osSKU: 'AzureLinux'
+    availabilityZones: availabilityZones
+    enableAutoScaling: true
+    minCount: spotControlPlanePoolMinCount
+    maxCount: spotControlPlanePoolMaxCount
+    maxPods: 50
+    scaleSetPriority: 'Spot'
+    // Delete, not Deallocate: a reclaimed node's own local state (none held here - the
+    // control plane is stateless) is not worth paying to keep. Deallocate would keep billing
+    // for the underlying disk with no benefit here.
+    scaleSetEvictionPolicy: 'Delete'
+    // -1 means "pay up to the on-demand price" - eviction only happens on genuine Azure
+    // capacity reclaim, never because a price cap was undercut.
+    spotMaxPrice: -1
+    nodeLabels: {
+      'groundwork.io/tier': 'controlplane'
+    }
+    // The taint every Spot pool needs by convention: nothing schedules here unless it explicitly
+    // tolerates it (k8s/controlplane/deployment.tmpl.yaml). Prevents anything *else* in the
+    // cluster from silently landing on interruptible capacity.
+    nodeTaints: ['kubernetes.azure.com/scalesetpriority=spot:NoSchedule']
+    // No upgradeSettings/maxSurge here - verified live 2026-09-12, ARM rejects it outright
+    // ("Spot pools can't set max surge"): surge exists to guarantee replacement capacity during a
+    // node-image upgrade, which Spot's whole premise (reclaimable, not guaranteed) can't promise.
   }
 }
 

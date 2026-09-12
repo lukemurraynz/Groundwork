@@ -130,6 +130,19 @@ class BlueprintStage(BaseModel):
     like a defect in our code.
     """
 
+    timeout_seconds: Annotated[int, Field(ge=1)] = 1800
+    """Wall-clock bound on one attempt of ``stage.execute()`` (waf-assessment.md §1.2).
+
+    A stage that raises is already caught by ``Sequencer._run_one_stage``; a stage that hangs
+    (a call that never returns) is not — nothing bounds it short of this. 1800s (30 minutes) is a
+    conservative default sized for the slowest known real operation (Fabric capacity
+    provisioning); override per stage only with evidence a specific stage legitimately needs more
+    or can safely bound tighter, the same discipline ``minimum_retry_interval_seconds`` already
+    uses. A timeout is classified transient (the same retry budget and requeue path as any other
+    transient failure applies), since a hang is at least as likely to be a slow dependency as a
+    genuine defect.
+    """
+
 
 class PlatformBlueprint(BaseModel):
     """An approved platform topology, loaded from a versioned declarative artefact."""

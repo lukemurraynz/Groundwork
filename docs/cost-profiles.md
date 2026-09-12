@@ -78,3 +78,15 @@ azd env set GROUNDWORK_COST_PROFILE production
 Check regional quota first. Production maximums total 60 vCPU; this subscription had 65 DSv5 vCPUs
 available in `australiaeast` on 2026-07-30, which fits but leaves little headroom for a second
 environment.
+
+## Network hardening is a separate knob, and it has its own cost
+
+`enableNetworkHardening` (default `false`) is orthogonal to `costProfile` — it doesn't change
+sizing, it changes network exposure (`docs/waf-assessment.md` §2.11). It carries one real cost
+line worth calling out explicitly rather than burying it in a bicep comment: enabling it bumps
+Container Registry from **Basic to Premium SKU**, because ACR's IP-firewall (`networkRuleSet`) is
+a Premium-only feature. This applies in both `dev` and `production` cost profiles — Premium ACR's
+per-GB storage and higher base price is a standing cost from the day hardening is turned on, not
+a one-time charge. Check current Premium ACR pricing before enabling in a cost-sensitive
+environment; Network Security Perimeter itself (used for the other five resources) has no
+separate charge.

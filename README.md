@@ -15,6 +15,20 @@ New to the repo? [`docs/customer-journey-map.md`](docs/customer-journey-map.md) 
 Groundwork actually does end to end: onboarding, planning and approval, provisioning, and ongoing
 operation, with sequence and architecture diagrams, before you're in the code.
 
+## Screenshots
+
+| | |
+| --- | --- |
+| ![Voice channel, idle](docs/screenshot-voice-idle.png) Voice channel at rest, signed in and waiting for a tap to answer. | ![Voice onboarding, confirming a subscription ID](docs/screenshot-voice-subscription-confirm.jpg) Voice reading a spoken subscription ID back for confirmation before it's used. |
+| ![Voice session with a plan sealed, ready to approve](docs/screenshot-voice-plan-approval.jpg) A sealed plan with priced cost, ready for "Approve & Deploy". | ![Control plane OpenAPI docs](docs/screenshot-api-docs-plans.jpg) The control plane's OpenAPI docs: plans, approvals, deployments, tenants. |
+
+<details>
+<summary>Control plane health check</summary>
+
+![Control plane health endpoint executed in the OpenAPI docs](docs/screenshot-api-docs-health.jpg)
+
+</details>
+
 ## What's in the box
 
 | Piece | What it does |
@@ -63,6 +77,16 @@ default to requiring MFA-or-fresh-token evidence in the caller's token
 (`GROUNDWORK_REQUIRE_STEP_UP_APPROVAL`, see [ADR-0011](docs/adr/0011-voice-alone-authorises-irreversible-actions.md)).
 If you're testing locally and hit a `step-up-authentication-required` 403 you didn't expect, that's
 why: `azd env set GROUNDWORK_REQUIRE_STEP_UP_APPROVAL false` turns it off for that environment.
+
+Network hardening (`GROUNDWORK_ENABLE_NETWORK_HARDENING`, see
+[docs/waf-assessment.md §2.11](docs/waf-assessment.md)) is off by default and restricts
+Groundwork's own backend resources to known network sources. If you turn it on, set
+`GROUNDWORK_ACR_ALLOWED_IP_RANGES` to your own machine's IP as a comma-separated list, e.g.
+`azd env set GROUNDWORK_ACR_ALLOWED_IP_RANGES "203.0.113.5/32"`, before `azd deploy` — the
+Container Registry firewall it enables has no default beyond "nothing extra allowed", so an
+unlisted IP gets a clear 403 on image push rather than a silent failure, but it will block
+`azd deploy` until you add it. (Comma-separated, not a JSON array: `azd`'s environment-variable
+substitution can't safely carry a value containing quote characters through the parameters file.)
 
 `azd up` provisions AKS, Cosmos DB, Key Vault, Container Registry, Foundry, and a dedicated Speech
 resource for Voice Live, then builds and deploys both services. A `preprovision` hook checks your
@@ -135,6 +159,8 @@ has the reasoning behind every non-obvious infrastructure choice.
   Groundwork's own infrastructure and code.
 - [`docs/runbook.md`](docs/runbook.md) / [`docs/release-checklist.md`](docs/release-checklist.md) —
   what an operator does when something breaks, and the discipline around an `azd` release.
+- [`docs/teams-channel-scoping.md`](docs/teams-channel-scoping.md) — scoping notes for a future
+  Teams conversational surface (Phase 2), not a decision to build one.
 The non-negotiables every design decision gets checked against (deterministic execution boundary,
   gated approval for irreversible actions, secretless identity) are stated directly in
 [ADR-0001](docs/adr/0001-ai-plans-deterministic-code-executes.md) and enforced in code

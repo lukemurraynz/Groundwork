@@ -130,3 +130,4 @@ resource controlPlaneAccess 'Microsoft.Authorization/roleAssignments@2022-04-01'
 
 output vaultUri string = keyVault.properties.vaultUri
 output vaultName string = keyVault.name
+output resourceId string = keyVault.id

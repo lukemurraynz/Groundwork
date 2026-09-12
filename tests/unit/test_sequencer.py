@@ -9,6 +9,7 @@ is the sequencing, checkpointing, and halt behaviour around whatever a stage rep
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -336,6 +337,47 @@ async def test_a_stage_that_raises_halts_instead_of_crashing_the_run(blueprint, 
     # The raising stage still produced a real audit record — it was authorised before it ran,
     # regardless of how it ended.
     # devops_project, infrastructure, identity, networking
+    assert len(audit_container.documents) == 4
+
+
+class _HangingStage:
+    """A stage whose ``execute()`` never returns — the failure mode a raised-exception guard does
+    nothing for. Only a wall-clock bound (``asyncio.wait_for``) can end this."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[StageExecutionContext] = []
+
+    async def execute(self, context: StageExecutionContext) -> StageOutcome:
+        self.calls.append(context)
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable: the timeout must fire before this sleep ever completes")
+
+
+async def test_a_stage_that_hangs_times_out_and_requeues(blueprint, valid_plan) -> None:
+    # Real timeout_seconds defaults to 1800s - override just the one stage under test so the test
+    # itself runs in milliseconds rather than proving the point by actually waiting half an hour.
+    timed_out_stages = tuple(
+        stage.model_copy(update={"timeout_seconds": 1}) if stage.name == "networking" else stage
+        for stage in blueprint.stages
+    )
+    short_timeout_blueprint = blueprint.model_copy(update={"stages": timed_out_stages})
+
+    stages = _succeeding_stages()
+    stages["networking"] = _HangingStage("networking")
+    sequencer, _repo, audit_container = _sequencer(short_timeout_blueprint, stages, _clock())
+
+    result = await sequencer.run(_deployment(), valid_plan, credential=_FakeCredential())
+
+    # A timeout is transient (module docstring point 5), so — same as any other transient failure
+    # within its retry budget — this requeues rather than halting the whole deployment. Only
+    # StageTimeout could have produced a transient failure here (_HangingStage never itself
+    # returns an outcome), so QUEUED is proof the timeout path fired, not a raised exception.
+    assert result.deployment.status is DeploymentStatus.QUEUED
+    assert result.halted is None
+    assert len(stages["fabric"].calls) == 0
+    # devops_project, infrastructure, identity, networking all got a real audit record before the
+    # timeout fired — being bounded doesn't mean it was never attempted.
     assert len(audit_container.documents) == 4
 
 

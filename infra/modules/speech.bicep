@@ -79,4 +79,5 @@ resource operatorSpeechAccess 'Microsoft.Authorization/roleAssignments@2022-04-0
 }
 
 output accountName string = account.name
+output resourceId string = account.id
 output endpoint string = 'https://${account.properties.customSubDomainName}.cognitiveservices.azure.com'

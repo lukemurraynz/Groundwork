@@ -66,6 +66,28 @@ param budgetAmount int = 200
 @description('Recover a soft-deleted Key Vault of the derived name instead of creating a new one. See modules/keyvault.bicep.')
 param recoverKeyVault bool = false
 
+// docs/waf-assessment.md §2.11: Cosmos, Key Vault, Storage, Foundry, Speech, and ACR are all
+// publicNetworkAccess 'Enabled' by default. Off by default here so an already-provisioned
+// environment (there's a groundwork-dev azd env in this repo) is untouched until an operator
+// deliberately opts in — same convention as the four governance values below and the budget
+// module's "inactive until an email is set" pattern.
+@description('Restrict Groundwork\'s own backend resources (Cosmos, Key Vault, Storage, Foundry, Speech, ACR) to known network sources instead of the open-internet default. Off by default. See docs/waf-assessment.md §2.11 and modules/network-security-perimeter.bicep.')
+param enableNetworkHardening bool = false
+
+// azd's `${VAR}` substitution in main.parameters.json is a raw text splice into the parameters
+// JSON, with no re-escaping — a value containing `"` characters breaks the file no matter how it's
+// escaped in .env (verified live 2026-09-12: tried single, double, and triple-backslash escaping,
+// same parse error every time). A JSON-array-shaped string is therefore the wrong encoding here;
+// comma-separated avoids the problem entirely by never needing a quote character in the value.
+@description('Additional IP address/CIDR ranges (beyond the AKS cluster\'s own outbound IP, which is always allowed) let through the Container Registry firewall when enableNetworkHardening is true — for example, your own machine\'s IP so `azd deploy` can still push images. Comma-separated, e.g. \'203.0.113.5/32,198.51.100.9/32\' — set via `azd env set GROUNDWORK_ACR_ALLOWED_IP_RANGES`. Container Registry has no Network Security Perimeter support (2026-09-12), so this firewall is its only network control short of a full VNet migration. No default beyond empty: leaving it empty is safe — an unlisted IP just gets a clear 403 on push, not a silent failure — but set this before `azd deploy` succeeds with hardening on.')
+param acrAllowedIpRangesCsv string = ''
+
+// docs/waf-assessment.md §5.5: cost-optimisation only, scoped to control-plane on purpose — see
+// modules/aks.bicep's own param description for why executor and system are excluded.
+@description('Adds an optional, additional Spot-priced node pool for the control-plane tier, scaling from 0. Off by default; the fixed on-demand controlplane pool is untouched either way.')
+param enableSpotControlPlanePool bool = false
+var acrAllowedIpRanges array = empty(acrAllowedIpRangesCsv) ? [] : split(acrAllowedIpRangesCsv, ',')
+
 var isProduction = costProfile == 'production'
 
 // Pinned rather than floating so an upgrade is a reviewed change rather than drift.
@@ -175,6 +197,20 @@ module keyVault 'modules/keyvault.bicep' = {
   }
 }
 
+// See modules/outbound-ip.bicep for why this is its own module rather than a resource declared
+// directly here (subscription-scope BCP139) and why it's independent of both aks.bicep and
+// registry.bicep (would otherwise be circular).
+module outboundIp 'modules/outbound-ip.bicep' = if (enableNetworkHardening) {
+  name: 'groundwork-outbound-ip'
+  scope: platformResourceGroup
+  params: {
+    location: location
+    resourceToken: resourceToken
+    tags: tags
+    availabilityZones: availabilityZones
+  }
+}
+
 module registry 'modules/registry.bicep' = {
   name: 'groundwork-registry'
   scope: platformResourceGroup
@@ -182,6 +218,11 @@ module registry 'modules/registry.bicep' = {
     location: location
     resourceToken: resourceToken
     tags: tags
+    sku: enableNetworkHardening ? 'Premium' : 'Basic'
+    restrictPublicAccess: enableNetworkHardening
+    allowedIpRanges: enableNetworkHardening
+      ? union([outboundIp.?outputs.?ipAddress ?? ''], acrAllowedIpRanges)
+      : []
   }
 }
 
@@ -201,12 +242,15 @@ module aks 'modules/aks.bicep' = {
     controlPlanePoolMaxCount: isProduction ? 6 : 3
     executorPoolMinCount: isProduction ? 2 : 1
     executorPoolMaxCount: isProduction ? 6 : 3
+    enableSpotControlPlanePool: enableSpotControlPlanePool
+    spotControlPlanePoolMaxCount: isProduction ? 6 : 3
     logAnalyticsWorkspaceId: observability.outputs.logAnalyticsWorkspaceId
     controlPlaneIdentityId: identity.outputs.controlPlaneIdentityId
     orchestratorIdentityId: identity.outputs.orchestratorIdentityId
     clusterIdentityId: identity.outputs.clusterIdentityId
     operatorPrincipalId: operatorPrincipalId
     containerRegistryName: registry.outputs.registryName
+    outboundPublicIpId: enableNetworkHardening ? (outboundIp.?outputs.?resourceId ?? '') : ''
   }
 }
 
@@ -232,6 +276,20 @@ module speech 'modules/speech.bicep' = {
     tags: tags
     controlPlanePrincipalId: identity.outputs.controlPlanePrincipalId
     operatorPrincipalId: operatorPrincipalId
+  }
+}
+
+module networkSecurityPerimeter 'modules/network-security-perimeter.bicep' = if (enableNetworkHardening) {
+  name: 'groundwork-nsp'
+  scope: platformResourceGroup
+  params: {
+    location: location
+    resourceToken: resourceToken
+    tags: tags
+    keyVaultResourceId: keyVault.outputs.resourceId
+    storageAccountResourceId: storage.outputs.resourceId
+    cosmosAccountResourceId: cosmos.outputs.resourceId
+    foundryAccountResourceId: foundry.outputs.resourceId
   }
 }
 

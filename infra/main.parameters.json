@@ -22,6 +22,15 @@
     },
     "foundryAccountTokenOverride": {
       "value": "${GROUNDWORK_FOUNDRY_ACCOUNT_TOKEN_OVERRIDE=}"
+    },
+    "enableNetworkHardening": {
+      "value": "${GROUNDWORK_ENABLE_NETWORK_HARDENING=false}"
+    },
+    "acrAllowedIpRangesCsv": {
+      "value": "${GROUNDWORK_ACR_ALLOWED_IP_RANGES=}"
+    },
+    "enableSpotControlPlanePool": {
+      "value": "${GROUNDWORK_ENABLE_SPOT_CONTROLPLANE_POOL=false}"
     }
   }
 }

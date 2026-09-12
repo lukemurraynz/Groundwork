@@ -200,3 +200,4 @@ resource operatorBlobAccess 'Microsoft.Authorization/roleAssignments@2022-04-01'
 
 output blobEndpoint string = storageAccount.properties.primaryEndpoints.blob
 output accountName string = storageAccount.name
+output resourceId string = storageAccount.id

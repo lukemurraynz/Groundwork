@@ -63,6 +63,22 @@ hooks:
       interactive: false
       continueOnError: false
 
+  # Advisory only (docs/waf-assessment.md §1.4): warns if a deployment is currently EXECUTING
+  # before this restarts the pod. Auto-recovery already handles a mid-deployment restart correctly
+  # (the subscription lease releases promptly and the queue loop resumes from the last checkpoint
+  # on its next poll) — this only gives the operator a chance to wait if convenient. Always exits 0.
+  predeploy:
+    posix:
+      shell: sh
+      run: ./scripts/predeploy.sh
+      interactive: false
+      continueOnError: true
+    windows:
+      shell: pwsh
+      run: ./scripts/predeploy.ps1
+      interactive: false
+      continueOnError: true
+
   # Creates the multi-tenant Entra application (FR-006) that customers consent to and that
   # api/auth.py validates inbound tokens against. Paired with predown below so `azd up`/`azd down`
   # fully own its lifecycle — an Entra app registration has no resource group, so it would otherwise

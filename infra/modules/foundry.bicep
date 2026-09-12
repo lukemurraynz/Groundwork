@@ -231,6 +231,7 @@ resource operatorVoiceLiveFoundryUserAccess 'Microsoft.Authorization/roleAssignm
 }
 
 output accountName string = account.name
+output resourceId string = account.id
 output projectName string = project.name
 output modelDeploymentName string = modelDeployment.name
 output projectEndpoint string = 'https://${account.properties.customSubDomainName}.services.ai.azure.com/api/projects/${project.name}'

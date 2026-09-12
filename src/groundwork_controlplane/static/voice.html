@@ -369,6 +369,14 @@ var pendingPlan = null;
 var pendingNeedsLicenceAck = false;
 var pendingAckChecked = false;
 var pendingApproved = false;
+// Spoken-confirmation gate (waf-assessment.md §2.4): a bare "yes/approve/go ahead" no longer
+// deploys by itself. It first gets a readback of the real plan and a request for an explicit
+// second "confirm", inside a bounded window - raises the bar against an ambient/accidental
+// trigger on an already-authenticated session without needing continuous identity
+// re-verification. The Approve button stays one-step: a physical tap is already deliberate.
+var pendingConfirmationRequested = false;
+var pendingConfirmationDeadline = 0;
+var VOICE_CONFIRMATION_WINDOW_MS = 45000;
 
 function showPlan(plan) {
   setState('done');
@@ -379,6 +387,7 @@ function showPlan(plan) {
   var c = document.getElementById('conversation');
   pendingPlan = plan;
   pendingApproved = false;
+  pendingConfirmationRequested = false;
   // FR-013d: below F64 every Power BI viewer needs Pro/PPU. Show the disclosure and gate
   // approval - button or voice - behind an explicit acknowledgement; the flag rides to
   // /v1/voice/approve.
@@ -400,7 +409,7 @@ function showPlan(plan) {
   btn.textContent = 'Approve & Deploy';
   btn.style.cssText = 'margin:.5rem 0;padding:.5rem 1rem;background:var(--success);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.85rem';
   if (pendingNeedsLicenceAck) { btn.disabled = true; }
-  btn.onclick = function() { pendingApproved = true; approvePlan(plan, pendingAckChecked); };
+  btn.onclick = function() { pendingApproved = true; pendingConfirmationRequested = false; approvePlan(plan, pendingAckChecked); };
   c.appendChild(btn);
   c.scrollTop = c.scrollHeight;
   document.getElementById('hint').textContent = 'Plan ready. Say "approve" or tap Approve.';
@@ -408,8 +417,12 @@ function showPlan(plan) {
 
 // Called with every customer transcript line while a plan is showing. Deliberately simple,
 // literal phrase matching - not model interpretation - because the plan is the ONLY thing left
-// to decide once it is on screen (every field was already confirmed to get here), so even a
-// bare "yes" is unambiguous at this point in the conversation.
+// to decide once it is on screen (every field was already confirmed to get here).
+//
+// Two-step by design (see pendingConfirmationRequested above): the first approve-like utterance
+// never deploys anything by itself. It triggers a readback of the real plan and waits for an
+// explicit second "confirm" inside VOICE_CONFIRMATION_WINDOW_MS - a stricter phrase than the
+// first pass accepts, since it's literally what the readback just asked for.
 function maybeVoiceApprove(text) {
   if (!pendingPlan || pendingApproved) return;
   var t = text.toLowerCase();
@@ -423,8 +436,27 @@ function maybeVoiceApprove(text) {
     }
     pendingAckChecked = true;
   }
-  pendingApproved = true;
-  approvePlan(pendingPlan, pendingAckChecked);
+
+  if (pendingConfirmationRequested) {
+    if (Date.now() > pendingConfirmationDeadline) {
+      pendingConfirmationRequested = false;
+      addMsg('agent', 'That confirmation timed out. Say "approve" to start again, or tap Approve.');
+      document.getElementById('hint').textContent = 'Plan ready. Say "approve" or tap Approve.';
+      return;
+    }
+    if (!/\b(confirm|confirmed)\b/.test(t)) return; // still waiting on the confirmation phrase
+    pendingConfirmationRequested = false;
+    pendingApproved = true;
+    approvePlan(pendingPlan, pendingAckChecked);
+    return;
+  }
+
+  var cost = pendingPlan.costEstimate || {};
+  pendingConfirmationRequested = true;
+  pendingConfirmationDeadline = Date.now() + VOICE_CONFIRMATION_WINDOW_MS;
+  addMsg('agent', 'To confirm: deploy ' + pendingPlan.blueprintId + ' to ' + pendingPlan.region
+    + ', estimated ' + cost.monthlyTotal + ' ' + cost.currency + '/month? Say "confirm" to proceed, or tap Approve.');
+  document.getElementById('hint').textContent = 'Say "confirm" to proceed, or tap Approve.';
 }
 
 async function approvePlan(plan, licenceAcknowledged) {

@@ -195,7 +195,7 @@ Confirm the control-plane health endpoint responds:
 
 ```powershell
 $host = azd env get-value GROUNDWORK_PUBLIC_URL
-curl -s "https://$host/health" | ConvertFrom-Json
+curl -s "https://$host/health/ready" | ConvertFrom-Json
 ```
 
 **Pass criterion**: HTTP 200, body indicates healthy.
@@ -211,6 +211,16 @@ az monitor log-analytics query \
 
 **Pass criterion**: row count greater than 0. If zero after 5 minutes, workload identity ingestion
 is broken: check Monitoring Metrics Publisher role assignment on the App Insights resource.
+
+**If `enableNetworkHardening` is set on this environment** (`docs/waf-assessment.md` §2.11): the
+five Network Security Perimeter resource associations (Key Vault, Storage, Cosmos, Foundry,
+Speech) ship in `Learning` mode — they log what would be allowed or denied without blocking
+anything yet. This is not a one-time step but a recurring follow-up: review the NSP diagnostic
+logs (Log Analytics, `NetworkSecurityPerimeterAccessLogs` category) for a representative period
+after each provision that touches these resources, confirm nothing unexpected is being denied,
+then flip the associations you've reviewed to `accessMode: 'Enforced'` in
+`infra/modules/network-security-perimeter.bicep` as a deliberate, reviewed change — never as a
+default.
 
 ---
 

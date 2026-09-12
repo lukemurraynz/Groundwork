@@ -58,6 +58,28 @@ spec:
       serviceAccountName: controlplane
       nodeSelector:
         groundwork.io/tier: controlplane
+      # Optional Spot control-plane pool (aks.bicep, off by default): this toleration is what lets
+      # a pod land there at all — AKS taints every Spot pool by convention specifically so nothing
+      # schedules onto interruptible capacity without opting in. The nodeAffinity below is the
+      # other half: a soft preference for on-demand nodes, so the fixed replica count stays there
+      # in steady state and only spills onto Spot under genuine pressure (more replicas than
+      # on-demand capacity) — losing the Spot pool then means reduced burst headroom, not an
+      # outage of the two replicas this Service actually depends on.
+      tolerations:
+        - key: kubernetes.azure.com/scalesetpriority
+          operator: Equal
+          value: spot
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.azure.com/scalesetpriority
+                    operator: NotIn
+                    values:
+                      - spot
       # Spread across zones so a single zone loss cannot take out the planning surface (FR-041a).
       topologySpreadConstraints:
         - maxSkew: 1

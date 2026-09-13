@@ -50,6 +50,15 @@ _OWNERSHIP_NOTICE = (
     + "Groundwork now only monitors for configuration drift."
 )
 
+_HALTED_RECOVERY_NOTICE = (
+    "Your infrastructure built so far is preserved in your subscription — nothing is deleted "
+    "automatically. You have three recovery options: retry (resume from the last completed "
+    "stage), forward-fix (resume the same way, once you've corrected the underlying issue), or "
+    "rollback (redeploy to the last known-good configuration through your own Azure DevOps "
+    "pipeline — this requires a separate, distinct approval). Choose one from the app, or ask "
+    "your Groundwork contact."
+)
+
 
 def _stage_status_text(stage: StageSummary) -> str:
     if stage.never_ran:
@@ -110,6 +119,9 @@ def build_notification_content(report: DeploymentReport) -> NotificationContent:
     if report.outcome is ReportOutcome.SUCCEEDED:
         lines.append(_OWNERSHIP_NOTICE)
         lines.append("")
+    if report.outcome is ReportOutcome.HALTED:
+        lines.append(_HALTED_RECOVERY_NOTICE)
+        lines.append("")
     if report.resources_created:
         lines.append("Resources created:")
         lines.extend(f"  - {name}" for name in report.resources_created)
@@ -129,6 +141,8 @@ def build_notification_content(report: DeploymentReport) -> NotificationContent:
     ownership_html = ""
     if report.outcome is ReportOutcome.SUCCEEDED:
         ownership_html = f"<p>{_html.escape(_OWNERSHIP_NOTICE)}</p>"
+    if report.outcome is ReportOutcome.HALTED:
+        ownership_html = f"<p>{_html.escape(_HALTED_RECOVERY_NOTICE)}</p>"
     body_html = (
         f"<h1>Deployment {_html.escape(report.deployment_id)} {_html.escape(label)}</h1>"
         "<table>"
@@ -147,9 +161,47 @@ def build_notification_content(report: DeploymentReport) -> NotificationContent:
     return NotificationContent(subject=subject, plain_text=plain_text, html=html_body)
 
 
+def build_drift_notification_content(
+    *, tenant_id: str, subscription_id: str, region: str, blocking_failed_count: int
+) -> NotificationContent:
+    """Pure formatting for a blocking-drift alert — the customer-journey-map.md Near-Term
+    improvement, 2026-09-13: `engine/drift_watch.py` already detects drift on a schedule but had
+    no code path to the customer, only to a repository and internal metrics. Reuses the same
+    email channel FR-051 already built for deployment outcomes; no new channel needed.
+
+    Deliberately terse: this is an alert to check the app, not a diagnosis. The specific failing
+    assertions live in the pull-based readiness report (`GET
+    /v1/tenants/{tenantId}/onboarding/readiness-report`); repeating them here would drift out of
+    sync with that report's own, more detailed rendering.
+    """
+    plural = "check" if blocking_failed_count == 1 else "checks"
+    lines = [
+        f"Groundwork detected configuration drift in subscription {subscription_id} "
+        f"(region {region}).",
+        "",
+        f"{blocking_failed_count} readiness {plural} that previously passed "
+        f"{'is' if blocking_failed_count == 1 else 'are'} now failing.",
+        "",
+        "This does not block anything automatically — it's a signal to review before your next "
+        "deployment. See the full readiness report in the app for exactly what changed.",
+    ]
+    plain_text = scrub_text("\n".join(lines), redact_guids=False)
+    body_html = (
+        f"<h1>Configuration drift detected</h1>"
+        f"<p>Subscription {_html.escape(subscription_id)} (region {_html.escape(region)}).</p>"
+        f"<p>{blocking_failed_count} readiness {plural} that previously passed "
+        f"{'is' if blocking_failed_count == 1 else 'are'} now failing.</p>"
+        "<p>This does not block anything automatically — it's a signal to review before your "
+        "next deployment. See the full readiness report in the app for exactly what changed.</p>"
+    )
+    html_body = scrub_text(body_html, redact_guids=False)
+    subject = f"Groundwork: configuration drift detected in {tenant_id}"
+    return NotificationContent(subject=subject, plain_text=plain_text, html=html_body)
+
+
 class NotificationDispatcher:
-    """Formats and sends one deployment-outcome email. Nothing here resolves a recipient — see the
-    module docstring's "Disclosed, not built" section."""
+    """Formats and sends one deployment-outcome or drift-alert email. Nothing here resolves a
+    recipient — see the module docstring's "Disclosed, not built" section."""
 
     def __init__(self, *, email_sender: EmailSenderLike) -> None:
         self._email_sender = email_sender
@@ -162,6 +214,30 @@ class NotificationDispatcher:
         recipient_display_name: str,
     ) -> str:
         content = build_notification_content(report)
+        return await self._email_sender.send(
+            to_address=recipient_email,
+            to_display_name=recipient_display_name,
+            subject=content.subject,
+            plain_text=content.plain_text,
+            html=content.html,
+        )
+
+    async def notify_drift_detected(
+        self,
+        *,
+        tenant_id: str,
+        subscription_id: str,
+        region: str,
+        blocking_failed_count: int,
+        recipient_email: str,
+        recipient_display_name: str,
+    ) -> str:
+        content = build_drift_notification_content(
+            tenant_id=tenant_id,
+            subscription_id=subscription_id,
+            region=region,
+            blocking_failed_count=blocking_failed_count,
+        )
         return await self._email_sender.send(
             to_address=recipient_email,
             to_display_name=recipient_display_name,

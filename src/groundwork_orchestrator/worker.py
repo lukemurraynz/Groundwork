@@ -182,6 +182,29 @@ class _TenantNotifier:
             recipient_display_name=display_name,
         )
 
+    async def notify_drift_detected(
+        self,
+        *,
+        tenant_id: str,
+        subscription_id: str,
+        region: str,
+        blocking_failed_count: int,
+        recipient_email: str,
+        recipient_display_name: str,
+    ) -> None:
+        """Satisfies ``drift_watch.py``'s ``DriftNotifierLike`` — the recipient is already
+        resolved by the caller (``_evaluate_target`` holds the full ``CustomerTenant``), so this
+        is a thin pass-through to the dispatcher, unlike ``notify_deployment_outcome`` above
+        which does its own repository lookup because ``Sequencer`` only has a ``tenant_id``."""
+        await self._dispatcher.notify_drift_detected(
+            tenant_id=tenant_id,
+            subscription_id=subscription_id,
+            region=region,
+            blocking_failed_count=blocking_failed_count,
+            recipient_email=recipient_email,
+            recipient_display_name=recipient_display_name,
+        )
+
 
 class _TenantRepositoryLike(Protocol):
     async def read(self, tenant_id: str, item_id: str) -> CustomerTenant | None: ...
@@ -360,6 +383,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 credential_factory=credential_factory,
                 now_fn=lambda: datetime.now(UTC),
                 interval_seconds=settings.drift_interval_seconds,
+                notifier=notifier,
             ),
             name="groundwork-drift-watch",
         )

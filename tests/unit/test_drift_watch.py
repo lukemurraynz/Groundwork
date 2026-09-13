@@ -165,6 +165,7 @@ def _tenant(
     *,
     subscriptions: tuple[SubscriptionEntitlement, ...],
     consent_state: ConsentState = ConsentState.GRANTED,
+    notification_email: str | None = None,
 ) -> CustomerTenant:
     return CustomerTenant(
         tenant_id=tenant_id,
@@ -175,7 +176,34 @@ def _tenant(
         approved_regions=frozenset({"australiaeast"}),
         data_residency_regions=frozenset({"australiaeast"}),
         devops_organization_url="https://dev.azure.com/customer-org",
+        notification_email=notification_email,
     )
+
+
+class _FakeDriftNotifier:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def notify_drift_detected(
+        self,
+        *,
+        tenant_id: str,
+        subscription_id: str,
+        region: str,
+        blocking_failed_count: int,
+        recipient_email: str,
+        recipient_display_name: str,
+    ) -> None:
+        self.calls.append(
+            {
+                "tenant_id": tenant_id,
+                "subscription_id": subscription_id,
+                "region": region,
+                "blocking_failed_count": blocking_failed_count,
+                "recipient_email": recipient_email,
+                "recipient_display_name": recipient_display_name,
+            }
+        )
 
 
 class _Harness:
@@ -318,6 +346,86 @@ async def test_two_cycles_persist_and_transition_verdicts() -> None:
     assert round_tripped == persisted
     assert round_tripped.verdict is DriftVerdict.RECOVERED
     assert round_tripped.summary == recovered
+
+
+async def test_drift_notifier_fires_only_on_the_drifted_cycle() -> None:
+    """customer-journey-map.md Near-Term improvement, 2026-09-13: drift_watch.py detects drift on
+    a schedule but had no code path to the customer. The notifier must fire exactly once, on the
+    cycle where the verdict actually becomes DRIFTED — not on the stable cycle before it, nor the
+    recovered cycle after."""
+    harness = _Harness([TENANT_ID])
+    await harness.seed_tenant(
+        _tenant(
+            TENANT_ID,
+            subscriptions=(
+                SubscriptionEntitlement(subscription_id=SUBSCRIPTION_ID, display_name="sub"),
+            ),
+            notification_email="customer@example.invalid",
+        )
+    )
+    stable = _summary(_result(assertion_id="network.ok", status=ValidationStatus.PASSED))
+    drifted = _summary(_result(assertion_id="network.overlap", status=ValidationStatus.FAILED))
+    recovered = _summary(_result(assertion_id="network.ok", status=ValidationStatus.PASSED))
+    engine = _SequencedReadinessEngine({(TENANT_ID, SUBSCRIPTION_ID): [stable, drifted, recovered]})
+    notifier = _FakeDriftNotifier()
+
+    for _ in range(3):
+        await poll_once(
+            tenant_registry=harness.tenant_registry,
+            tenant_repository=harness.tenant_repository,
+            drift_repository=harness.drift_repository,
+            readiness_engine=engine,
+            readiness_settings=harness.readiness_settings,
+            credential_factory=harness.credential_factory,
+            now_fn=lambda: NOW,
+            notifier=notifier,
+        )
+
+    assert len(notifier.calls) == 1
+    call = notifier.calls[0]
+    assert call["tenant_id"] == TENANT_ID
+    assert call["subscription_id"] == SUBSCRIPTION_ID
+    assert call["region"] == "australiaeast"
+    assert call["blocking_failed_count"] == 1
+    assert call["recipient_email"] == "customer@example.invalid"
+
+
+async def test_drift_notification_skipped_without_recorded_email(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    harness = _Harness([TENANT_ID])
+    await harness.seed_tenant(
+        _tenant(
+            TENANT_ID,
+            subscriptions=(
+                SubscriptionEntitlement(subscription_id=SUBSCRIPTION_ID, display_name="sub"),
+            ),
+            notification_email=None,
+        )
+    )
+    stable = _summary(_result(assertion_id="network.ok", status=ValidationStatus.PASSED))
+    drifted = _summary(_result(assertion_id="network.overlap", status=ValidationStatus.FAILED))
+    engine = _SequencedReadinessEngine({(TENANT_ID, SUBSCRIPTION_ID): [stable, drifted]})
+    notifier = _FakeDriftNotifier()
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            await poll_once(
+                tenant_registry=harness.tenant_registry,
+                tenant_repository=harness.tenant_repository,
+                drift_repository=harness.drift_repository,
+                readiness_engine=engine,
+                readiness_settings=harness.readiness_settings,
+                credential_factory=harness.credential_factory,
+                now_fn=lambda: NOW,
+                notifier=notifier,
+            )
+
+    assert notifier.calls == []
+    assert any(
+        record.message == "drift notification skipped: no notification_email recorded for tenant"
+        for record in caplog.records
+    )
 
 
 async def test_run_forever_returns_immediately_when_disabled() -> None:

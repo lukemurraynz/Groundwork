@@ -96,7 +96,10 @@ from groundwork_controlplane.api.tenants import (
 )
 from groundwork_controlplane.approval.lookup import find_approval_by_plan_hash
 from groundwork_controlplane.approval.plan_identity import seal_plan
-from groundwork_controlplane.approval.service import record_approval
+from groundwork_controlplane.approval.service import (
+    record_approval,
+    step_up_authentication_satisfied,
+)
 from groundwork_controlplane.costing.licensing import licensing_disclosure_for
 from groundwork_orchestrator.state.repositories import ConversationRepository
 from groundwork_shared.telemetry.scrubbing import scrub_text
@@ -365,6 +368,20 @@ def _list_tenants_tool_core() -> dict[str, Any]:
     }
 
 
+def _check_step_up_status_tool_core() -> dict[str, Any]:
+    return {
+        "name": "check_step_up_status",
+        "description": (
+            "Check whether the caller's current sign-in already satisfies the step-up "
+            "authentication requirement (MFA, or a token issued in the last 10 minutes) that "
+            "approval enforces. Call this once a plan is ready, before telling the customer "
+            "that saying 'approve' will start the deployment - never as part of approving "
+            "anything yourself, this is a read-only check."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+
+
 _GENERATE_PLAN_TOOL_CORE = _generate_plan_tool_core()
 _GET_ONBOARDING_STATUS_TOOL_CORE = _get_onboarding_status_tool_core()
 _CREATE_TENANT_TOOL_CORE = _create_tenant_tool_core()
@@ -376,6 +393,7 @@ _QUICK_ONBOARD_TOOL_CORE = _quick_onboard_tool_core()
 _GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_CORE = _get_offshore_inference_disclosure_tool_core()
 _RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_CORE = _record_offshore_inference_consent_tool_core()
 _LIST_TENANTS_TOOL_CORE = _list_tenants_tool_core()
+_CHECK_STEP_UP_STATUS_TOOL_CORE = _check_step_up_status_tool_core()
 # Voice Live session.update.tools: flat, per function-calling-quickstart.py.
 _GENERATE_PLAN_TOOL_VOICE_LIVE = {"type": "function", **_GENERATE_PLAN_TOOL_CORE}
 _GET_ONBOARDING_STATUS_TOOL_VOICE_LIVE = {
@@ -406,6 +424,7 @@ _RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_VOICE_LIVE = {
     **_RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_CORE,
 }
 _LIST_TENANTS_TOOL_VOICE_LIVE = {"type": "function", **_LIST_TENANTS_TOOL_CORE}
+_CHECK_STEP_UP_STATUS_TOOL_VOICE_LIVE = {"type": "function", **_CHECK_STEP_UP_STATUS_TOOL_CORE}
 # /chat used to need a second, nested "Chat Completions" shape for these same tools. Now that it
 # calls the native client too (with auto function-invocation disabled — see
 # groundwork_controlplane.agents.providers.foundry_openai), it shares the flat shape above with
@@ -437,6 +456,7 @@ _ALL_VOICE_TOOLS: list[dict[str, Any]] = [
     _GET_OFFSHORE_INFERENCE_DISCLOSURE_TOOL_VOICE_LIVE,
     _RECORD_OFFSHORE_INFERENCE_CONSENT_TOOL_VOICE_LIVE,
     _LIST_TENANTS_TOOL_VOICE_LIVE,
+    _CHECK_STEP_UP_STATUS_TOOL_VOICE_LIVE,
 ]
 _VOICE_TOOL_NAMES: frozenset[str] = frozenset(tool["name"] for tool in _ALL_VOICE_TOOLS)
 
@@ -963,6 +983,32 @@ async def _run_list_tenants_tool(conn: Conn, caller: AuthenticatedCaller) -> dic
     }
 
 
+async def _run_check_step_up_status_tool(
+    conn: Conn, caller: AuthenticatedCaller
+) -> dict[str, object]:
+    """Read-only step-up check (R-tier, any caller) — the voice-channel twin of
+    ``GET /v1/approvals/step-up-check``. Lets the model warn the customer to re-authenticate
+    before inviting them to say "approve", instead of the gap only surfacing as a 403 on the
+    HTTP approval route the customer's own words trigger (approval itself stays off the tool
+    surface, per ADR-0011 — this only ever reports status, never approves anything)."""
+    required = conn.app.state.settings.governance.require_step_up_approval
+    satisfied = not required or step_up_authentication_satisfied(caller, now=_now(conn))
+    return {
+        "status": "ok",
+        "stepUpRequired": required,
+        "satisfied": satisfied,
+        "next_action": (
+            "Step-up is not required in this environment; proceed normally."
+            if not required
+            else "The customer's sign-in already satisfies step-up; proceed normally."
+            if satisfied
+            else "Tell the customer they will need to sign in again (or confirm their MFA "
+            "prompt) before they can say 'approve' - the approval call will otherwise fail "
+            "with a 403. Do this before telling them the plan is ready for approval, not after."
+        ),
+    }
+
+
 @router.websocket("/ws/voice/{session_id}")
 async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
     """Real-time duplex voice session: browser audio ↔ this relay ↔ Azure AI Voice Live.
@@ -1140,6 +1186,8 @@ async def voice_live_websocket(websocket: WebSocket, session_id: str) -> None:
                 sealed = await _run_record_offshore_inference_consent_tool(websocket, caller, args)
             elif tool_name == "list_tenants":
                 sealed = await _run_list_tenants_tool(websocket, caller)
+            elif tool_name == "check_step_up_status":
+                sealed = await _run_check_step_up_status_tool(websocket, caller)
             else:
                 sealed = await _run_trigger_bootstrap_identity_tool(websocket, caller, args)
         except AuthorizationError as exc:
@@ -1988,6 +2036,8 @@ async def voice_chat(
             onboarding = await _run_record_offshore_inference_consent_tool(request, caller, args)
         elif call.name == "list_tenants":
             onboarding = await _run_list_tenants_tool(request, caller)
+        elif call.name == "check_step_up_status":
+            onboarding = await _run_check_step_up_status_tool(request, caller)
 
     # Text reply path
     reply = response.text or ""

@@ -229,13 +229,14 @@ class _FakeVLSession:
         return _gen()
 
 
-def _caller() -> AuthenticatedCaller:
+def _caller(*, authentication_methods: frozenset[str] = frozenset()) -> AuthenticatedCaller:
     return AuthenticatedCaller(
         object_id=APPROVER_ID,
         tenant_id=TENANT_ID,
         display_name="Test Approver",
         roles=frozenset({CallerRole.APPROVER, CallerRole.OPERATOR}),
         token_expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+        authentication_methods=authentication_methods,
     )
 
 
@@ -245,6 +246,8 @@ def _build_app(
     configured: bool = True,
     gate_may_accept: bool = True,
     scripted: list[dict[str, Any]] | None = None,
+    require_step_up_approval: bool = False,
+    caller: AuthenticatedCaller | None = None,
 ) -> tuple[FastAPI, _FakeVLSession, _FakeContainer]:
     import groundwork_controlplane.api.voice as voice_module
 
@@ -268,7 +271,10 @@ def _build_app(
             "governance": type(
                 "FakeGovernance",
                 (),
-                {"default_tenant_concurrency_cap": 3},
+                {
+                    "default_tenant_concurrency_cap": 3,
+                    "require_step_up_approval": require_step_up_approval,
+                },
             )(),
             "readiness": type(
                 "FakeReadiness",
@@ -282,7 +288,7 @@ def _build_app(
             )(),
         },
     )()
-    app.state.token_validator = _FakeTokenValidator({"good-token": _caller()})
+    app.state.token_validator = _FakeTokenValidator({"good-token": caller or _caller()})
     app.state.voice_gate = _FakeGate(may_accept=gate_may_accept)
     app.state.planning_agent = _FakePlanningAgent(valid_plan)
     app.state.credential = _FakeCredential()
@@ -650,6 +656,92 @@ def test_create_tenant_tool_returns_structured_result(valid_plan: DeploymentPlan
         ws.close()
 
 
+def test_check_step_up_status_tool_reports_unsatisfied(valid_plan: DeploymentPlan) -> None:
+    """The step-up precheck tool must actually be dispatched, not silently dropped like the four
+    tools the 2026-09-13 allowlist-drift bug found — and must report the customer's real token
+    state (no MFA claim here), not a hardcoded "satisfied" default."""
+    scripted = [
+        {"type": "session.updated"},
+        {
+            "type": "conversation.item.created",
+            "item": {
+                "type": "function_call",
+                "name": "check_step_up_status",
+                "call_id": "call-1",
+                "id": "item-1",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.done",
+            "call_id": "call-1",
+            "arguments": "{}",
+        },
+        {"type": "response.done"},
+    ]
+    app, session, _plan_container = _build_app(
+        valid_plan, scripted=scripted, require_step_up_approval=True
+    )
+    client = TestClient(app)
+
+    with client.websocket_connect("/v1/voice/ws/voice/22222222-2222-2222-2222-222222222222") as ws:
+        ws.send_text(_auth_frame())
+        assert ws.receive_json() == {"type": "ready"}
+        import time as _time
+
+        _deadline = _time.monotonic() + 5.0
+        while not session.function_results and _time.monotonic() < _deadline:
+            _time.sleep(0.01)
+        assert session.function_results, "check_step_up_status was silently dropped"
+        result = session.function_results[0]["result"]["result"]
+        assert result["stepUpRequired"] is True
+        assert result["satisfied"] is False
+        ws.close()
+
+
+def test_check_step_up_status_tool_reports_satisfied_for_mfa_caller(
+    valid_plan: DeploymentPlan,
+) -> None:
+    scripted = [
+        {"type": "session.updated"},
+        {
+            "type": "conversation.item.created",
+            "item": {
+                "type": "function_call",
+                "name": "check_step_up_status",
+                "call_id": "call-1",
+                "id": "item-1",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.done",
+            "call_id": "call-1",
+            "arguments": "{}",
+        },
+        {"type": "response.done"},
+    ]
+    app, session, _plan_container = _build_app(
+        valid_plan,
+        scripted=scripted,
+        require_step_up_approval=True,
+        caller=_caller(authentication_methods=frozenset({"mfa"})),
+    )
+    client = TestClient(app)
+
+    with client.websocket_connect("/v1/voice/ws/voice/22222222-2222-2222-2222-222222222222") as ws:
+        ws.send_text(_auth_frame())
+        assert ws.receive_json() == {"type": "ready"}
+        import time as _time
+
+        _deadline = _time.monotonic() + 5.0
+        while not session.function_results and _time.monotonic() < _deadline:
+            _time.sleep(0.01)
+        assert session.function_results
+        result = session.function_results[0]["result"]["result"]
+        assert result["stepUpRequired"] is True
+        assert result["satisfied"] is True
+        ws.close()
+
+
 def _wait_for_function_result(session: _FakeVLSession, *, timeout: float = 5.0) -> None:
     import time as _time
 
@@ -849,10 +941,9 @@ def test_typed_text_during_active_response_is_queued_not_dropped(
         import time as _time
 
         _deadline = _time.monotonic() + 5.0
-        while (
-            {"type": "response.create"} not in session.sent_events
-            and _time.monotonic() < _deadline
-        ):
+        while {
+            "type": "response.create"
+        } not in session.sent_events and _time.monotonic() < _deadline:
             _time.sleep(0.01)
         assert {"type": "response.create"} in session.sent_events  # the greeting, in flight
 
@@ -873,10 +964,9 @@ def test_typed_text_during_active_response_is_queued_not_dropped(
         session.push({"type": "response.done"})
 
         _deadline = _time.monotonic() + 5.0
-        while (
-            [e["type"] for e in session.sent_events].count("response.create") < 2
-            and _time.monotonic() < _deadline
-        ):
+        while [e["type"] for e in session.sent_events].count(
+            "response.create"
+        ) < 2 and _time.monotonic() < _deadline:
             _time.sleep(0.01)
         assert [e["type"] for e in session.sent_events].count("response.create") == 2
         ws.close()
@@ -970,10 +1060,9 @@ def test_text_sent_the_instant_ready_arrives_still_does_not_race(
         session.push({"type": "response.done"})
 
         _deadline = _time.monotonic() + 5.0
-        while (
-            [e["type"] for e in session.sent_events].count("response.create") < 2
-            and _time.monotonic() < _deadline
-        ):
+        while [e["type"] for e in session.sent_events].count(
+            "response.create"
+        ) < 2 and _time.monotonic() < _deadline:
             _time.sleep(0.01)
         assert [e["type"] for e in session.sent_events].count("response.create") == 2
         ws.close()

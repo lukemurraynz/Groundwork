@@ -1011,9 +1011,7 @@ def test_voice_chat_get_onboarding_status_includes_step_completion(
             _FakeChatResponse(
                 _FakeChatMessage(
                     content="Here is the onboarding status.",
-                    tool_calls=[
-                        _FakeToolCall(name="get_onboarding_status", arguments="{}")
-                    ],
+                    tool_calls=[_FakeToolCall(name="get_onboarding_status", arguments="{}")],
                 )
             )
         ]
@@ -1165,6 +1163,46 @@ def test_voice_chat_list_tenants_returns_portfolio(
     assert onboarding["tenants"][0]["tenantId"] == TENANT_ID
     assert onboarding["tenants"][0]["consentState"] == "granted"
     assert onboarding["tenants"][0]["notificationEmailRecorded"] is True
+
+
+def test_voice_chat_check_step_up_status_reports_satisfied_for_mfa_caller(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    """Read-only precheck tool dispatch over /chat — mirrors the WS-path coverage in
+    test_voice_live_endpoint.py, which also covers the unsatisfied branch of the same
+    underlying step_up_authentication_satisfied() logic."""
+    sealed = _sealed_plan(valid_plan)
+    app, _deployment_container, _artefacts = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=100000.0,
+        retail_prices_client=retail_prices_client,
+        callers={"good-token": _caller(APPROVER_ID)},
+    )
+    app.state.planning_agent = _FakeVoicePlanningAgent(
+        replies=["You're all set to approve."], plan=valid_plan
+    )
+    app.state.voice_tool_client = _FakeChatClient(
+        [
+            _FakeChatResponse(
+                _FakeChatMessage(
+                    content="You're all set to approve.",
+                    tool_calls=[_FakeToolCall(name="check_step_up_status", arguments="{}")],
+                )
+            )
+        ]
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/voice/chat",
+        headers=_auth_headers("good-token"),
+        params={"message": "Am I ready to approve this?"},
+    )
+
+    assert response.status_code == 200, response.text
+    onboarding = response.json()["onboarding"]
+    assert onboarding["stepUpRequired"] is True
+    assert onboarding["satisfied"] is True
 
 
 def test_voice_chat_list_tenants_denied_for_non_operator(

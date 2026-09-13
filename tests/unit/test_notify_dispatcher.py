@@ -76,10 +76,31 @@ def test_content_restates_pipeline_ownership_only_on_success() -> None:
     )
     halted = build_notification_content(_report(outcome=ReportOutcome.HALTED))
 
-    assert "own Azure DevOps pipeline" in succeeded.plain_text
-    assert "own Azure DevOps pipeline" in succeeded.html
-    assert "own Azure DevOps pipeline" not in halted.plain_text
-    assert "own Azure DevOps pipeline" not in halted.html
+    ownership_phrase = "Groundwork now only monitors for configuration drift"
+    assert ownership_phrase in succeeded.plain_text
+    assert ownership_phrase in succeeded.html
+    assert ownership_phrase not in halted.plain_text
+    assert ownership_phrase not in halted.html
+
+
+def test_content_names_recovery_options_only_on_halt() -> None:
+    """ADR-0009: rollback is real (redeploys to last known-good via the customer's own Azure
+    DevOps pipeline) — the halted notification must say so, not disclose it as unavailable."""
+    halted = build_notification_content(_report(outcome=ReportOutcome.HALTED))
+    succeeded = build_notification_content(
+        _report(outcome=ReportOutcome.SUCCEEDED, stage_summary=_SUCCEEDED_STAGE_SUMMARY)
+    )
+
+    for body in (halted.plain_text, halted.html):
+        assert "retry" in body
+        assert "forward-fix" in body
+        assert "rollback" in body
+        assert "preserved in your subscription" in body
+        assert "own Azure DevOps pipeline" in body
+
+    recovery_phrase = "You have three recovery options"
+    assert recovery_phrase not in succeeded.plain_text
+    assert recovery_phrase not in succeeded.html
 
 
 def test_content_lists_every_stage_including_never_ran() -> None:

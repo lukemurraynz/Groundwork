@@ -783,3 +783,86 @@ async def test_step_up_approval_freshness_boundary(
     )
 
     assert response.status_code == expected_status, response.text
+
+
+@pytest.mark.security
+async def test_step_up_check_reports_satisfied_for_mfa_token(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    """customer-journey-map.md Quick Win, 2026-09-13: let the approval prompt check step-up
+    status before submission instead of only discovering the gap from a 403."""
+    sealed = _sealed_plan(valid_plan)
+    expected_total = await _expected_monthly_total(
+        retail_prices_client, valid_plan.fabric_capacity_sku, valid_plan.region.value
+    )
+    app, _store = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=expected_total + 1000,
+        retail_prices_client=retail_prices_client,
+        callers={
+            "mfa-token": _caller(
+                APPROVER_ID,
+                authentication_methods=frozenset({"mfa"}),
+                token_issued_at=NOW - timedelta(hours=1),
+            )
+        },
+        require_step_up_approval=True,
+    )
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/approvals/step-up-check", headers={"Authorization": "Bearer mfa-token"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"stepUpRequired": True, "satisfied": True}
+
+
+@pytest.mark.security
+async def test_step_up_check_reports_unsatisfied_for_stale_non_mfa_token(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    sealed = _sealed_plan(valid_plan)
+    expected_total = await _expected_monthly_total(
+        retail_prices_client, valid_plan.fabric_capacity_sku, valid_plan.region.value
+    )
+    app, _store = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=expected_total + 1000,
+        retail_prices_client=retail_prices_client,
+        callers={"stale-token": _caller(APPROVER_ID, token_issued_at=NOW - timedelta(minutes=11))},
+        require_step_up_approval=True,
+    )
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/approvals/step-up-check", headers={"Authorization": "Bearer stale-token"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"stepUpRequired": True, "satisfied": False}
+
+
+@pytest.mark.security
+async def test_step_up_check_always_satisfied_when_gate_disabled(
+    valid_plan: DeploymentPlan, retail_prices_client: RetailPricesClient
+) -> None:
+    sealed = _sealed_plan(valid_plan)
+    expected_total = await _expected_monthly_total(
+        retail_prices_client, valid_plan.fabric_capacity_sku, valid_plan.region.value
+    )
+    app, _store = _build_app(
+        sealed_plan=sealed,
+        threshold_aud=expected_total + 1000,
+        retail_prices_client=retail_prices_client,
+        callers={"plain-token": _caller(APPROVER_ID, token_issued_at=NOW - timedelta(days=1))},
+        require_step_up_approval=False,
+    )
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/approvals/step-up-check", headers={"Authorization": "Bearer plain-token"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"stepUpRequired": False, "satisfied": True}

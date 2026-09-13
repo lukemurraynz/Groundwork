@@ -1,7 +1,22 @@
 # ADR-0005: Halt-and-preserve over auto-rollback; rollback gated but not executed (501)
 
 **Date**: 2026-08-01
-**Status**: Accepted (2026-08-01)
+**Status**: Accepted (2026-08-01). **Superseded in part by [ADR-0009](0009-proposal-rollback-via-customer-pipeline.md) (2026-08-26, implemented same day): rollback execution is real.**
+
+**[VERIFIED] 2026-09-13: the `501` behaviour this ADR's Decision section describes below is no
+longer current.** `api/recovery.py`'s own module docstring and code confirm a fully validated,
+approved rollback request now queues and runs a `rollback.yml` pipeline inside the customer's own
+Azure DevOps project (redeploying the last known-good configuration; it never fights `denyDelete`
+because it redeploys prior state rather than deleting). ADR-0009 refines this ADR rather than
+replacing it — every gating rule described below (offered only where the blueprint's
+`recovery_path` names it, a distinct and complete rollback approval, bound to the same plan hash,
+distinct from the original execution's approval) is unchanged and still enforced exactly as
+written. Only the "once all checks pass, the endpoint returns `501`" sentence is now false; treat
+every other sentence in the Decision section as still accurate. This correction was made after a
+2026-09-13 audit found `customer-journey-map.md` had built a "trust breaker" critical moment and a
+top-ranked pain point on the stale `501` premise, discovered only by reading `api/recovery.py`
+directly rather than trusting this ADR's own title and body — the same failure mode
+`production-validation`'s "false in-use claim" / "claimed-but-unreproducible" taxonomy shapes name.
 
 ## Context
 

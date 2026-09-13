@@ -44,6 +44,26 @@ class CredentialFactoryLike(Protocol):
     def scoped_to(self, tenant_id: str) -> TenantCredentialLike: ...
 
 
+class DriftNotifierLike(Protocol):
+    """Alert the customer once drift crosses the blocking threshold (customer-journey-map.md
+    Near-Term improvement, 2026-09-13). Injectable for the same reason
+    ``sequencer.py``'s ``NotifierLike`` is — tests supply a fake, and a caller that does not want
+    notification (a unit test) never has to fake an email provider. Recipient is passed directly,
+    not resolved from a repository: ``_evaluate_target`` already holds the full
+    :class:`CustomerTenant`, so a second repository lookup here would be redundant."""
+
+    async def notify_drift_detected(
+        self,
+        *,
+        tenant_id: str,
+        subscription_id: str,
+        region: str,
+        blocking_failed_count: int,
+        recipient_email: str,
+        recipient_display_name: str,
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class DriftEvaluationOutcome:
     tenant_id: str
@@ -87,6 +107,7 @@ async def _evaluate_target(
     readiness_settings: ReadinessSettings,
     credential_factory: CredentialFactoryLike,
     now_fn: Callable[[], datetime],
+    notifier: DriftNotifierLike | None = None,
 ) -> DriftEvaluationOutcome:
     region = _primary_region(tenant)
     credential = credential_factory.scoped_to(tenant.tenant_id).for_tenant(tenant.tenant_id)
@@ -141,6 +162,26 @@ async def _evaluate_target(
                 "blocking_failed_count": blocking_failed_count,
             },
         )
+        if notifier is not None:
+            if tenant.notification_email is None:
+                logger.warning(
+                    "drift notification skipped: no notification_email recorded for tenant",
+                    extra={
+                        "component": "orchestrator",
+                        "operation": "drift_watch",
+                        "tenant_id": tenant.tenant_id,
+                        "subscription_id": subscription_id,
+                    },
+                )
+            else:
+                await notifier.notify_drift_detected(
+                    tenant_id=tenant.tenant_id,
+                    subscription_id=subscription_id,
+                    region=region,
+                    blocking_failed_count=blocking_failed_count,
+                    recipient_email=tenant.notification_email,
+                    recipient_display_name=tenant.contact_display_name or tenant.display_name,
+                )
     return DriftEvaluationOutcome(
         tenant_id=tenant.tenant_id,
         subscription_id=subscription_id,
@@ -160,6 +201,7 @@ async def poll_once(
     readiness_settings: ReadinessSettings,
     credential_factory: CredentialFactoryLike,
     now_fn: Callable[[], datetime],
+    notifier: DriftNotifierLike | None = None,
 ) -> list[DriftEvaluationOutcome]:
     outcomes: list[DriftEvaluationOutcome] = []
     async for tenant_id in tenant_registry.list_tenant_ids():
@@ -195,6 +237,7 @@ async def poll_once(
                     readiness_settings=readiness_settings,
                     credential_factory=credential_factory,
                     now_fn=now_fn,
+                    notifier=notifier,
                 )
             except Exception:
                 logger.error(
@@ -234,6 +277,7 @@ async def run_forever(
     credential_factory: CredentialFactoryLike,
     now_fn: Callable[[], datetime],
     interval_seconds: int = DEFAULT_DRIFT_INTERVAL_SECONDS,
+    notifier: DriftNotifierLike | None = None,
 ) -> None:
     if not drift_watch_enabled(interval_seconds):
         return
@@ -247,6 +291,7 @@ async def run_forever(
                 readiness_settings=readiness_settings,
                 credential_factory=credential_factory,
                 now_fn=now_fn,
+                notifier=notifier,
             )
         except Exception:
             logger.error(

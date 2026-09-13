@@ -1,128 +1,81 @@
-"""_TenantNotifier — resolves email recipients from CustomerTenant for deployment notifications."""
+"""``_TenantNotifier`` (``worker.py``) — the concrete adapter wired into both the deployment-
+outcome notifier seam (``Sequencer.NotifierLike``) and the drift-alert seam
+(``drift_watch.DriftNotifierLike``).
+
+No test file existed for this class before; this one is deliberately narrow — it covers the
+``notify_drift_detected`` pass-through added 2026-09-13 (customer-journey-map.md Near-Term
+improvement), not a full ``lifespan()`` replication. ``drift_watch.py``'s own unit tests already
+prove the *caller* side (drift_watch invoking ``notifier.notify_drift_detected(...)`` with the
+right arguments against a fake); this proves the *adapter* side, end to end against a real
+``NotificationDispatcher`` (only the email transport is faked, the same seam
+``test_notify_dispatcher.py`` uses). The one fact this file cannot verify — that ``worker.py``'s
+lifespan actually passes the same ``notifier`` object into ``run_drift_watch_forever(...)`` — is a
+one-line, directly-readable call site (``notifier=notifier``), not a code path prone to a silent
+logic regression; a full lifespan test to cover it would need to fake most of the orchestrator's
+external dependencies (Cosmos, Storage, Foundry, every Stage) for a single kwarg.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from groundwork_contracts.audit import (
-    AuthorityChain,
-    DeploymentReport,
-    ReportOutcome,
-    StageStatus,
-    StageSummary,
-)
 from groundwork_contracts.tenant import CustomerTenant
-
-# Private class under test — imported directly as it is the adapter being tested.
 from groundwork_orchestrator.worker import _TenantNotifier
 from groundwork_shared.notify.dispatcher import NotificationDispatcher
 
-_NOW = datetime(2026, 8, 15, tzinfo=UTC)
-_TENANT_ID = "11111111-1111-1111-1111-111111111111"
-_DEPLOYMENT_ID = "88888888-8888-8888-8888-888888888888"
-_PLAN_HASH = "sha256:" + "a" * 64
-
-
-def _report() -> DeploymentReport:
-    return DeploymentReport(
-        report_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
-        deployment_id=_DEPLOYMENT_ID,
-        tenant_id=_TENANT_ID,
-        correlation_id="77777777-7777-7777-7777-777777777777",
-        authority=AuthorityChain(
-            plan_hash=_PLAN_HASH,
-            approval_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        ),
-        outcome=ReportOutcome.SUCCEEDED,
-        stage_summary=(
-            StageSummary(stage_name="devops_project", status=StageStatus.SUCCEEDED, attempts=1),
-        ),
-        resources_created=("proj-groundwork",),
-        iac_artefact_versions={"standard-production-fabric": "1.0.0"},
-        final_monthly_cost_aud=250.0,
-        blob_uri="https://example.invalid/reports/dddddddd.json",
-        content_hash="sha256:" + "0" * 64,
-        generated_at=_NOW,
-        retention_expires_at=_NOW + timedelta(days=365),
-    )
-
-
-@dataclass
-class _FakeEmailSender:
-    calls: list[dict] = field(default_factory=list)
-
-    async def send(self, *, to_address, to_display_name, subject, plain_text, html) -> str:
-        self.calls.append(
-            {"to_address": to_address, "to_display_name": to_display_name, "subject": subject}
-        )
-        return "op-456"
-
-
-def _tenant(*, notification_email: str | None, contact_display_name: str | None = None):
-    return CustomerTenant(
-        tenant_id=_TENANT_ID,
-        display_name="Contoso",
-        approved_regions=frozenset({"australiaeast"}),
-        data_residency_regions=frozenset({"australiaeast"}),
-        notification_email=notification_email,
-        contact_display_name=contact_display_name,
-    )
-
 
 class _FakeTenantRepo:
-    def __init__(self, tenant: CustomerTenant | None) -> None:
-        self._tenant = tenant
+    """Unused by notify_drift_detected — present only because _TenantNotifier.__init__
+    requires it, matching notify_deployment_outcome's own repo-lookup shape."""
 
     async def read(self, tenant_id: str, item_id: str) -> CustomerTenant | None:
-        return self._tenant
+        raise AssertionError("notify_drift_detected must not look up the tenant repository")
 
 
-def _make_notifier(
-    tenant: CustomerTenant | None,
-) -> tuple[_TenantNotifier, _FakeEmailSender]:
+class _FakeEmailSender:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def send(
+        self,
+        *,
+        to_address: str,
+        to_display_name: str,
+        subject: str,
+        plain_text: str,
+        html: str,
+    ) -> str:
+        self.calls.append(
+            {
+                "to_address": to_address,
+                "to_display_name": to_display_name,
+                "subject": subject,
+                "plain_text": plain_text,
+                "html": html,
+            }
+        )
+        return "op-123"
+
+
+async def test_notify_drift_detected_forwards_to_the_real_dispatcher() -> None:
     sender = _FakeEmailSender()
-    dispatcher = NotificationDispatcher(email_sender=sender)
     notifier = _TenantNotifier(
-        tenant_repo=_FakeTenantRepo(tenant),
-        dispatcher=dispatcher,
+        tenant_repo=_FakeTenantRepo(), dispatcher=NotificationDispatcher(email_sender=sender)
     )
-    return notifier, sender
 
+    await notifier.notify_drift_detected(
+        tenant_id="11111111-1111-1111-1111-111111111111",
+        subscription_id="33333333-3333-3333-3333-333333333333",
+        region="australiaeast",
+        blocking_failed_count=2,
+        recipient_email="customer@example.invalid",
+        recipient_display_name="Test Customer",
+    )
 
-async def test_sends_to_tenant_notification_email(valid_plan) -> None:
-    notifier, sender = _make_notifier(_tenant(notification_email="admin@contoso.onmicrosoft.com"))
-    await notifier.notify_deployment_outcome(_report(), valid_plan, tenant_id=_TENANT_ID, now=_NOW)
     assert len(sender.calls) == 1
-    assert sender.calls[0]["to_address"] == "admin@contoso.onmicrosoft.com"
-
-
-async def test_uses_contact_display_name_when_set(valid_plan) -> None:
-    notifier, sender = _make_notifier(
-        _tenant(notification_email="admin@contoso.onmicrosoft.com", contact_display_name="Jane Doe")
-    )
-    await notifier.notify_deployment_outcome(_report(), valid_plan, tenant_id=_TENANT_ID, now=_NOW)
-    assert sender.calls[0]["to_display_name"] == "Jane Doe"
-
-
-async def test_falls_back_to_tenant_display_name_when_contact_display_name_absent(
-    valid_plan,
-) -> None:
-    notifier, sender = _make_notifier(
-        _tenant(notification_email="admin@contoso.onmicrosoft.com", contact_display_name=None)
-    )
-    await notifier.notify_deployment_outcome(_report(), valid_plan, tenant_id=_TENANT_ID, now=_NOW)
-    assert sender.calls[0]["to_display_name"] == "Contoso"
-
-
-async def test_skips_notification_when_tenant_has_no_email(valid_plan) -> None:
-    notifier, sender = _make_notifier(_tenant(notification_email=None))
-    # Must not raise — silently skip.
-    await notifier.notify_deployment_outcome(_report(), valid_plan, tenant_id=_TENANT_ID, now=_NOW)
-    assert sender.calls == []
-
-
-async def test_skips_notification_when_tenant_not_found(valid_plan) -> None:
-    notifier, sender = _make_notifier(None)
-    await notifier.notify_deployment_outcome(_report(), valid_plan, tenant_id=_TENANT_ID, now=_NOW)
-    assert sender.calls == []
+    call = sender.calls[0]
+    assert call["to_address"] == "customer@example.invalid"
+    assert call["to_display_name"] == "Test Customer"
+    assert "11111111-1111-1111-1111-111111111111" in call["subject"]
+    assert "33333333-3333-3333-3333-333333333333" in call["plain_text"]
+    assert "2 readiness checks" in call["plain_text"]

@@ -24,7 +24,10 @@ from groundwork_contracts.approval import (
 from groundwork_controlplane.api.auth import AuthenticatedCaller, CallerRole
 from groundwork_controlplane.api.plans import get_authenticated_caller
 from groundwork_controlplane.approval.lookup import find_approval_by_plan_hash
-from groundwork_controlplane.approval.service import record_approval
+from groundwork_controlplane.approval.service import (
+    record_approval,
+    step_up_authentication_satisfied,
+)
 from groundwork_shared.storage.sas import read_only_sas_url
 
 router = APIRouter(prefix="/v1", tags=["approvals"])
@@ -95,6 +98,26 @@ async def _approval_response(
         body["secondApprovalRequired"] = False
         body["isSelfApproval"] = record.is_self_approval
     return body
+
+
+@router.get("/approvals/step-up-check")
+async def check_step_up_authentication(
+    request: Request,
+    caller: Annotated[AuthenticatedCaller, Depends(get_authenticated_caller)],
+) -> dict[str, object]:
+    """Lets the approval prompt (voice, chat, or UI) check the caller's *current* token against
+    the step-up requirement before inviting them to approve, instead of only discovering the gap
+    from a 403 on the approval call itself.
+
+    Read-only, no plan context needed — the same rule ``record_approval`` enforces
+    (``approval/service.py``'s ``step_up_authentication_satisfied``), applied to whatever token
+    the caller holds right now. ``stepUpRequired: false`` means this environment doesn't enforce
+    the gate at all (``GROUNDWORK_REQUIRE_STEP_UP_APPROVAL=false``), in which case ``satisfied``
+    is always ``true`` — there is nothing to satisfy.
+    """
+    required = request.app.state.settings.governance.require_step_up_approval
+    satisfied = not required or step_up_authentication_satisfied(caller, now=_now(request))
+    return {"stepUpRequired": required, "satisfied": satisfied}
 
 
 @router.post("/plans/{plan_id}/approvals", status_code=201)

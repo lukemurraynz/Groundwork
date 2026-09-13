@@ -98,11 +98,20 @@ class StepUpAuthenticationRequiredError(Exception):
 _STEP_UP_MAX_TOKEN_AGE = timedelta(minutes=10)
 
 
-def _require_step_up_authentication(caller: AuthenticatedCaller, *, now: datetime) -> None:
+def step_up_authentication_satisfied(caller: AuthenticatedCaller, *, now: datetime) -> bool:
+    """Whether ``caller``'s current token already carries step-up evidence (MFA in ``amr``, or
+    issued within the last 10 minutes) — the same rule :func:`_require_step_up_authentication`
+    enforces, exposed as a plain predicate so a caller can check *before* attempting an approval,
+    not only discover the gap from a 403 on the approval call itself (customer-journey-map.md
+    Quick Win, 2026-09-13: pre-check token freshness/MFA before submission)."""
     if "mfa" in caller.authentication_methods:
-        return
+        return True
     issued_at = caller.token_issued_at
-    if issued_at is not None and issued_at <= now and now - issued_at <= _STEP_UP_MAX_TOKEN_AGE:
+    return issued_at is not None and issued_at <= now and now - issued_at <= _STEP_UP_MAX_TOKEN_AGE
+
+
+def _require_step_up_authentication(caller: AuthenticatedCaller, *, now: datetime) -> None:
+    if step_up_authentication_satisfied(caller, now=now):
         return
     raise StepUpAuthenticationRequiredError(
         "approval requires a token that shows MFA in the amr claim or was issued within the last "

@@ -413,6 +413,22 @@ function showPlan(plan) {
   c.appendChild(btn);
   c.scrollTop = c.scrollHeight;
   document.getElementById('hint').textContent = 'Plan ready. Say "approve" or tap Approve.';
+  warnIfStepUpNotSatisfied();
+}
+
+// customer-journey-map.md Quick Win, 2026-09-13: tell the customer up front if their sign-in
+// won't satisfy the step-up requirement, instead of letting them find out from a 403 after
+// they've already said "approve" or tapped the button. Read-only - never blocks the button,
+// which stays the source of truth (a 403 there still wins if this check races a token change).
+async function warnIfStepUpNotSatisfied() {
+  var r;
+  try { r = await authFetch('/v1/approvals/step-up-check'); } catch (e) { return; }
+  if (!r.ok) return; // best-effort UX hint; the approval call itself is the real gate
+  var d;
+  try { d = await r.json(); } catch (e) { return; }
+  if (d.stepUpRequired && !d.satisfied) {
+    addMsg('agent', 'Before you approve, you may need to sign in again or complete an MFA prompt - your current sign-in is not fresh enough on its own.');
+  }
 }
 
 // Called with every customer transcript line while a plan is showing. Deliberately simple,
